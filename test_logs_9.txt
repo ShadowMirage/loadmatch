@@ -1,0 +1,139 @@
+
+============================================================
+🧪 RUNNING TEST: hello
+============================================================
+[1] detect_spam → PASS
+[2] normalize_input → hello
+[3] greeting_check → triggered
+[4] state_before → MAIN_MENU
+[5] extraction → None
+[6] inferred_action → greeting
+[7] validation → PASS (greeting)
+[8] routing → build_response
+[9] db_operation → None
+[10] response → 👋 Welcome to LoadMatch
+/Users/tony/Freight_ai/loadmatch/app/services/whatsapp_service.py:104: RuntimeWarning: coroutine 'AsyncMockMixin._execute_mock_call' was never awaited
+  response.raise_for_status()
+RuntimeWarning: Enable tracemalloc to get the object allocation traceback
+
+============================================================
+🧪 RUNNING TEST: 7 tons cotton from jaipur to gwalior
+============================================================
+[1] detect_spam → PASS
+[2] normalize_input → 7 tons cotton from jaipur to gwalior
+[3] greeting_check → skipped
+[4] state_before → MAIN_MENU
+Claude API failure phone=919999999999 err=Timeout should be used inside a task
+Traceback (most recent call last):
+  File "/Users/tony/Freight_ai/loadmatch/app/services/chatbot_service.py", line 261, in handle_message
+    response = await asyncio.wait_for(
+               ^^^^^^^^^^^^^^^^^^^^^^^
+    ...<8 lines>...
+    )
+    ^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.2/Frameworks/Python.framework/Versions/3.14/lib/python3.14/asyncio/tasks.py", line 487, in wait_for
+    async with timeouts.timeout(timeout):
+               ~~~~~~~~~~~~~~~~^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.2/Frameworks/Python.framework/Versions/3.14/lib/python3.14/asyncio/timeouts.py", line 88, in __aenter__
+    raise RuntimeError("Timeout should be used inside a task")
+RuntimeError: Timeout should be used inside a task
+/Users/tony/Freight_ai/loadmatch/app/services/chatbot_service.py:309: RuntimeWarning: coroutine 'AsyncMessages.create' was never awaited
+  return ("⚠️ Temporary issue. Please try again in a moment.", None)
+RuntimeWarning: Enable tracemalloc to get the object allocation traceback
+[5] extraction → None
+[6] inferred_action → general_chat
+[7] validation → PASS (general chat)
+[8] routing → build_response
+[9] db_operation → None
+[10] response → ⚠️ Temporary issue. Please try again in a moment.
+
+============================================================
+🧪 RUNNING TEST: interactive
+============================================================
+[1] detect_spam → PASS
+[2] normalize_input → Delivery Status
+[3] greeting_check → skipped
+[4] state_before → (interactive)
+[5] extraction → None
+[6] inferred_action → Delivery Status
+[7] validation → PASS (interactive)
+[8] routing → route_interactive_payload(Delivery Status)
+[9] db_operation → (delegated)
+[10] response → (interactive menu)
+
+============================================================
+🧪 RUNNING TEST: image
+============================================================
+[1] detect_spam → PASS
+[2] normalize_input → image_upload
+[3] greeting_check → skipped
+[4] state_before → kyc_flow
+[5] extraction → fake_media_id_12345
+[6] inferred_action → upload_image
+[7] validation → PASS (kyc_flow)
+[8] routing → handle_kyc_image
+[9] db_operation → (delegated)
+[10] response → ✅ KYC document received or ⚠️ Error
+/Users/tony/Freight_ai/loadmatch/app/services/whatsapp_service.py:59: RuntimeWarning: coroutine 'AsyncMockMixin._execute_mock_call' was never awaited
+  media_info_response.raise_for_status()
+RuntimeWarning: Enable tracemalloc to get the object allocation traceback
+KYC upload failed for user_id=6c53faa7-669f-4d58-95eb-50393a7298f2: Parameter validation failed:
+Invalid type for parameter Body, value: None, type: <class 'NoneType'>, valid types: <class 'bytes'>, <class 'bytearray'>, file-like object
+
+============================================================
+🧪 RUNNING TEST: 5 ton
+============================================================
+[1] detect_spam → PASS
+[2] normalize_input → 5 ton
+[3] greeting_check → skipped
+[4] state_before → MAIN_MENU
+Claude API failure phone=919999999999 err=Timeout should be used inside a task
+Traceback (most recent call last):
+  File "/Users/tony/Freight_ai/loadmatch/app/services/chatbot_service.py", line 261, in handle_message
+    response = await asyncio.wait_for(
+               ^^^^^^^^^^^^^^^^^^^^^^^
+    ...<8 lines>...
+    )
+    ^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.2/Frameworks/Python.framework/Versions/3.14/lib/python3.14/asyncio/tasks.py", line 487, in wait_for
+    async with timeouts.timeout(timeout):
+               ~~~~~~~~~~~~~~~~^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.2/Frameworks/Python.framework/Versions/3.14/lib/python3.14/asyncio/timeouts.py", line 88, in __aenter__
+    raise RuntimeError("Timeout should be used inside a task")
+RuntimeError: Timeout should be used inside a task
+[5] extraction → None
+[6] inferred_action → general_chat
+[7] validation → PASS (general chat)
+[8] routing → build_response
+[9] db_operation → None
+[10] response → ⚠️ Temporary issue. Please try again in a moment.
+
+============================================================
+🧪 RUNNING TEST: RJ14AB1234
+============================================================
+[1] detect_spam → PASS
+[2] normalize_input → rj14ab1234
+[3] greeting_check → skipped
+[4] state_before → MAIN_MENU
+Claude API failure phone=919999999999 err=Timeout should be used inside a task
+Traceback (most recent call last):
+  File "/Users/tony/Freight_ai/loadmatch/app/services/chatbot_service.py", line 261, in handle_message
+    response = await asyncio.wait_for(
+               ^^^^^^^^^^^^^^^^^^^^^^^
+    ...<8 lines>...
+    )
+    ^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.2/Frameworks/Python.framework/Versions/3.14/lib/python3.14/asyncio/tasks.py", line 487, in wait_for
+    async with timeouts.timeout(timeout):
+               ~~~~~~~~~~~~~~~~^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.2/Frameworks/Python.framework/Versions/3.14/lib/python3.14/asyncio/timeouts.py", line 88, in __aenter__
+    raise RuntimeError("Timeout should be used inside a task")
+RuntimeError: Timeout should be used inside a task
+[5] extraction → None
+[6] inferred_action → general_chat
+[7] validation → PASS (general chat)
+[8] routing → build_response
+[9] db_operation → None
+[10] response → ⚠️ Temporary issue. Please try again in a moment.
+
+✅ All tests complete.

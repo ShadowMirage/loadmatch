@@ -1,146 +1,208 @@
 import json
-from anthropic import AsyncAnthropic
+import logging
+import re
 from sqlalchemy.orm import Session
 
-from app.config import settings
 from app.models.user import User
 from app.models.conversation import Conversation
-from app.tools.bot_tools import TOOLS, execute_tool
+from app.services.session_manager import get_session, get_session_data
+from app.services.ai_extraction_service import extract_with_context
 
-SYSTEM_PROMPT = """You are the LoadMatch assistant on WhatsApp — a smart, friendly helper for Indian truck owners and shippers.
+logger = logging.getLogger(__name__)
 
-Your only goals:
-1. Help shippers post load requests (goods to send from city A to city B)
-2. Help transporters post available truck space (empty/partial truck going A to B)  
-3. Show matches and help confirm them
-4. Help with KYC document uploads
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
-Rules:
-- Ask only ONE question at a time
-- Keep all messages SHORT — this is WhatsApp, not email
-- If user is new (no name or role set), first ask their name then whether they are a Shipper, Transporter, or Both — do this before anything else
-- If user sends [IMAGE:media_id] in their message, ask them which document it is (Aadhaar/PAN/RC Book/Driving License/GST) then call save_kyc_document
-- Confirm details with user before calling any create_ tool
-- Respond in the same language the user writes in (Hindi or English)
-- Use ₹ symbol for prices, not dollars
-- Never mention internal IDs to users, use friendly references like 'your load from Delhi to Mumbai'
+def _quick_extract(text: str) -> dict:
+    import re
 
-User context:
-Phone: {phone}
-Name: {name}
-Role: {role}
-KYC Status: {kyc_status}"""
+    t = text.lower()
+    data = {}
 
-MODEL_NAME = "claude-3-5-sonnet-20241022"  # Using available sonnet class locally depending on anthropic versions usually mapped
+    # ✅ PRICE FIX (moved after data init)
+    price_match = re.search(r'(\d+(?:\.\d+)?)\s*/?\s*kg', t)
+    if price_match:
+        data["rate_per_kg"] = float(price_match.group(1))
 
-client = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
+    route = re.search(
+        r"(?:from\s+(\w+)\s+to\s+(\w+)|(\w+)\s+se\s+(\w+)|(\w+)\s+to\s+(\w+))",
+        t
+    )
+    weight = re.search(r"(\d+(?:\.\d+)?)\s*(ton|tons|kg|tonne)", t)
+    plate = re.search(r"[a-z]{2}\d{2}[a-z]{1,3}\d{4}", t)
+    date = re.search(r"(tomorrow|today|kal|aaj)", t)
 
-async def handle_message(phone: str, text: str, db: Session) -> str:
-    # 1. Get or create User
+    if route:
+        data["from"] = (route.group(1) or route.group(3) or route.group(5) or "").title()
+        data["to"] = (route.group(2) or route.group(4) or route.group(6) or "").title()
+
+    if weight:
+        val = float(weight.group(1))
+        if "ton" in weight.group(2):
+            val *= 1000
+        data["weight_kg"] = int(val)
+
+    if plate:
+        data["plate"] = plate.group(0).upper()
+
+    if date:
+        d = date.group(1)
+        data["date"] = "tomorrow" if d in ["kal", "tomorrow"] else "today"
+
+    return data
+
+
+def _infer_fallback_from_text(text: str) -> tuple[str, dict | None]:
+    """
+    When AI fails, attempt to extract partial entities from raw text.
+    Returns (reply_text, action_or_None).
+    """
+    if not text:
+        return ("❓ Could you clarify your request?", None)
+
+    t = text.lower()
+    route_match = re.search(r"(?:from\s+(\w+)\s+to\s+(\w+)|(\w+)\s+se\s+(\w+))", t)
+    weight_match = re.search(r"(\d+(?:\.\d+)?)\s*(?:ton(?:ne)?s?|kg|tonne)", t)
+    
+    if route_match and weight_match:
+        frm = (route_match.group(1) or route_match.group(3) or "?").title()
+        to  = (route_match.group(2) or route_match.group(4) or "?").title()
+        kg  = float(weight_match.group(1))
+        return (None, {"action": "ask_missing_field", "field": "date", "data": {"from": frm, "to": to, "weight_kg": kg}})
+
+    if route_match:
+        frm = (route_match.group(1) or route_match.group(3) or "?").title()
+        to  = (route_match.group(2) or route_match.group(4) or "?").title()
+        return (None, {"action": "ask_missing_field", "field": "weight_kg", "data": {"from": frm, "to": to}})
+
+    return ("📦 Tell me what you're looking for (e.g., '10 ton Jaipur to Delhi tomorrow').", None)
+
+
+def render_truck_confirmation(data: dict) -> tuple[str, list[dict]]:
+    body = (
+        f"🚚 Confirm Truck Listing\n\n"
+        f"📍 {data.get('from','?').title()} → {data.get('to','?').title()}\n"
+        f"⚖️ {data.get('weight_kg', data.get('capacity_kg', '?'))} kg\n"
+        f"💰 ₹{data.get('rate_per_kg','?')} / kg\n"
+        f"📅 {data.get('date','?')}"
+    )
+    buttons = [
+        {"id": "CONFIRM_TRUCK_LISTING", "title": "✅ Confirm"},
+        {"id": "EDIT_TRUCK", "title": "✏️ Edit"},
+        {"id": "MAIN_MENU", "title": "🏠 Main Menu"}
+    ]
+    return body, buttons
+
+def render_truck_confirmation(data: dict) -> tuple[str, list[dict]]:
+    body = (
+        f"🚚 Confirm Truck Listing\n\n"
+        f"📍 {data.get('from','?').title()} → {data.get('to','?').title()}\n"
+        f"⚖️ {data.get('capacity_kg', data.get('weight_kg', '?'))} kg\n"
+        f"💰 ₹{data.get('rate_per_kg','?')} / kg\n"
+        f"📅 {data.get('date','?')}"
+    )
+
+    buttons = [
+        {"id": "CONFIRM_TRUCK_LISTING", "title": "✅ Confirm"},
+        {"id": "EDIT_TRUCK", "title": "✏️ Edit"},
+        {"id": "MAIN_MENU", "title": "🏠 Main Menu"}
+    ]
+
+    return body, buttons
+
+
+# ---------------------------------------------------------------------------
+# Public interface (STRICT CONTRACT: returns (reply, action))
+# ---------------------------------------------------------------------------
+
+async def handle_message(phone: str, text: str, db: Session) -> tuple[str | None, dict | None]:
+
     user = db.query(User).filter(User.phone == phone).first()
     if not user:
-        user = User(phone=phone)
-        db.add(user)
-        db.commit()
-        db.refresh(user)
-        
-    # 2. Load last 20 conversation messages
-    history_records = (
-        db.query(Conversation)
-        .filter(Conversation.user_id == user.id)
-        .filter(Conversation.session_id == phone)
-        .order_by(Conversation.created_at.asc())
-        .limit(20)
-        .all()
-    )
-    
-    # 3. Build messages list
-    messages = []
-    for record in history_records:
-        # Load string content back into anthropic dict blocks if possible
-        # for simplicity we treat user and assistant block as text directly.
-        try:
-             messages.append({"role": record.role, "content": json.loads(record.content)})
-        except:
-             messages.append({"role": record.role, "content": record.content})
+        return ("User not found.", None)
 
-    # Add new user message
-    messages.append({"role": "user", "content": text})
-    
-    # Save the incoming user message to DB
-    user_conv = Conversation(
-        user_id=user.id,
-        session_id=phone,
-        role="user",
-        content=text
-    )
-    db.add(user_conv)
-    
-    # 4. Fill SYSTEM_PROMPT
-    system_filled = SYSTEM_PROMPT.format(
-        phone=phone,
-        name=user.name or "Unknown",
-        role=user.role.value if user.role else "Unknown",
-        kyc_status=user.kyc_status.value
-    )
-    
-    # 5. Call Claude with tools loop
-    while True:
-        response = await client.messages.create(
-            model=MODEL_NAME,
-            max_tokens=1000,
-            system=system_filled,
-            messages=messages,
-            tools=TOOLS
-        )
-        
-        messages.append({"role": "assistant", "content": response.content})
-        
-        if response.stop_reason == "tool_use":
-            tool_results = []
-            
-            for block in response.content:
-                if block.type == "tool_use":
-                    tool_name = block.name
-                    tool_args = block.input
-                    
-                    try:
-                        result = await execute_tool(tool_name, tool_args, db, user)
-                        tool_results.append({
-                            "type": "tool_result",
-                            "tool_use_id": block.id,
-                            "content": json.dumps(result)
-                        })
-                    except Exception as e:
-                        tool_results.append({
-                            "type": "tool_result",
-                            "tool_use_id": block.id,
-                            "content": f"Error: {str(e)}",
-                            "is_error": True
-                        })
-            
-            messages.append({"role": "user", "content": tool_results})
-            # Loop will continue and call Claude again
-        else:
-            break
-            
-    # 6. Extract final text reply
-    final_text = ""
-    for block in response.content:
-        if block.type == "text":
-            final_text += block.text
-            
-    # 7. Save assistant reply to Conversation table
-    # We serialize the entire final message block to keep tool definitions safe
-    # Though usually we can just store the final text layout too
-    assistant_conv = Conversation(
-        user_id=user.id,
-        session_id=phone,
-        role="assistant",
-        content=final_text
-    )
-    db.add(assistant_conv)
+    # 1. Deterministic extraction
+    quick = _quick_extract(text)
+
+    # 2. Session merge (SAFE)
+    existing_data = get_session_data(db, phone, user.id)
+    if not isinstance(existing_data, dict):
+        existing_data = {}
+
+    merged = {**existing_data, **quick}
+
+    # Save conversation
+    db.add(Conversation(user_id=user.id, session_id=phone, role="user", content=text))
     db.commit()
-    
-    # 8. Return reply string
-    return final_text
+
+    try:
+        # 3. AI extraction
+        action = await extract_with_context(text, merged)
+
+# 🔥 FORCE PARSE IF STRING (CRITICAL FIX)
+        if isinstance(action, str):
+
+            cleaned = action.strip()
+
+    # 🔥 FIX 1: wrap broken fragments
+            if not cleaned.startswith("{"):
+                cleaned = "{" + cleaned
+            if not cleaned.endswith("}"):
+                cleaned = cleaned + "}"
+
+    # 🔥 FIX 2: remove leading junk (like \n or text)
+            cleaned = re.sub(r"^[^{]*", "", cleaned)
+
+            try:
+                action = json.loads(cleaned)
+            except Exception as e:
+                logger.error(f"AI JSON parse failed: {cleaned} | Error: {e}")
+                action = None
+
+# Final validation
+        if not isinstance(action, dict):
+            action = None
+        # FINAL SAFETY NET
+        if action and "action" not in action:
+            logger.error(f"Malformed AI response: {action}")
+            action = None
+
+        # 4. SESSION-AWARE FALLBACK (🔥 CRITICAL FIX)
+        if not action:
+
+            session = get_session(db, phone, user.id)
+            current_wf = session.current_workflow if session else None
+
+            if current_wf in ["TRUCK_FLOW", "CONFIRMATION_PENDING"]:
+                return (None, {
+                    "action": "confirm_truck_listing",
+                    "data": merged
+                })
+
+            if current_wf in ["LOAD_FLOW", "CONFIRMATION_PENDING"]:
+                return (None, {
+                    "action": "confirm_load_request",
+                    "data": merged
+                })
+
+            # fallback NLP
+            reply, fallback_action = _infer_fallback_from_text(text)
+
+            if fallback_action:
+                return (None, fallback_action)
+
+            return ("👋 Hello! How can I help?", {"action": "general_chat"})
+
+        return (None, action)
+
+    except Exception as e:
+        logger.error(f"Intelligence failure: {e}")
+
+        # SAFE FALLBACK
+        reply, fallback_action = _infer_fallback_from_text(text)
+
+        if fallback_action:
+            return (None, fallback_action)
+
+        return ("⚠️ Something went wrong. Please try again.", None)

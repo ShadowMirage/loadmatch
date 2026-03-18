@@ -1,15 +1,9 @@
 import uuid
-from enum import Enum
 from sqlalchemy import Column, String, Boolean, Integer, DateTime, ForeignKey, func, Enum as SQLEnum
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 from app.database import Base
-
-class TruckType(str, Enum):
-    mini = "mini"
-    medium = "medium"
-    large = "large"
-    trailer = "trailer"
+from app.models.enums import TruckType
 
 class Truck(Base):
     __tablename__ = "trucks"

@@ -1,0 +1,141 @@
+
+============================================================
+🧪 RUNNING TEST: hello
+============================================================
+[1] detect_spam → PASS
+[2] normalize_input → hello
+[3] greeting_check → triggered
+[4] state_before → MAIN_MENU
+[5] extraction → None
+[6] inferred_action → greeting
+[7] validation → PASS (greeting)
+[8] routing → build_response
+[9] db_operation → None
+[10] response → 👋 Welcome to LoadMatch
+Traceback (most recent call last):
+  File "/Users/tony/Freight_ai/loadmatch/venv/lib/python3.14/site-packages/httpcore/_async/connection_pool.py", line 228, in handle_async_request
+    closing = self._assign_requests_to_connections()
+  File "/Users/tony/Freight_ai/loadmatch/venv/lib/python3.14/site-packages/httpcore/_async/connection_pool.py", line 328, in _assign_requests_to_connections
+    pool_request.assign_to_connection(connection)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^
+  File "/Users/tony/Freight_ai/loadmatch/venv/lib/python3.14/site-packages/httpcore/_async/connection_pool.py", line 25, in assign_to_connection
+    self._connection_acquired.set()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/Users/tony/Freight_ai/loadmatch/venv/lib/python3.14/site-packages/httpcore/_synchronization.py", line 130, in set
+    self.setup()
+    ~~~~~~~~~~^^
+  File "/Users/tony/Freight_ai/loadmatch/venv/lib/python3.14/site-packages/httpcore/_synchronization.py", line 122, in setup
+    self._backend = current_async_library()
+                    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "/Users/tony/Freight_ai/loadmatch/venv/lib/python3.14/site-packages/httpcore/_synchronization.py", line 30, in current_async_library
+    environment = sniffio.current_async_library()
+  File "/Users/tony/Freight_ai/loadmatch/venv/lib/python3.14/site-packages/sniffio/_impl.py", line 93, in current_async_library
+    raise AsyncLibraryNotFoundError(
+        "unknown async library, or not in async context"
+    )
+sniffio._impl.AsyncLibraryNotFoundError: unknown async library, or not in async context
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/tony/Freight_ai/loadmatch/app/services/whatsapp_service.py", line 100, in send_interactive_buttons
+    response = await client.post(url, headers=headers, json=payload)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/tony/Freight_ai/loadmatch/venv/lib/python3.14/site-packages/httpx/_client.py", line 1859, in post
+    return await self.request(
+           ^^^^^^^^^^^^^^^^^^^
+    ...<13 lines>...
+    )
+    ^
+  File "/Users/tony/Freight_ai/loadmatch/venv/lib/python3.14/site-packages/httpx/_client.py", line 1540, in request
+    return await self.send(request, auth=auth, follow_redirects=follow_redirects)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/tony/Freight_ai/loadmatch/venv/lib/python3.14/site-packages/httpx/_client.py", line 1629, in send
+    response = await self._send_handling_auth(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<4 lines>...
+    )
+    ^
+  File "/Users/tony/Freight_ai/loadmatch/venv/lib/python3.14/site-packages/httpx/_client.py", line 1657, in _send_handling_auth
+    response = await self._send_handling_redirects(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<3 lines>...
+    )
+    ^
+  File "/Users/tony/Freight_ai/loadmatch/venv/lib/python3.14/site-packages/httpx/_client.py", line 1694, in _send_handling_redirects
+    response = await self._send_single_request(request)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/tony/Freight_ai/loadmatch/venv/lib/python3.14/site-packages/httpx/_client.py", line 1730, in _send_single_request
+    response = await transport.handle_async_request(request)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/tony/Freight_ai/loadmatch/venv/lib/python3.14/site-packages/httpx/_transports/default.py", line 394, in handle_async_request
+    resp = await self._pool.handle_async_request(req)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/tony/Freight_ai/loadmatch/venv/lib/python3.14/site-packages/httpcore/_async/connection_pool.py", line 255, in handle_async_request
+    await self._close_connections(closing)
+  File "/Users/tony/Freight_ai/loadmatch/venv/lib/python3.14/site-packages/httpcore/_async/connection_pool.py", line 343, in _close_connections
+    with AsyncShieldCancellation():
+         ~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/Users/tony/Freight_ai/loadmatch/venv/lib/python3.14/site-packages/httpcore/_synchronization.py", line 203, in __init__
+    self._backend = current_async_library()
+                    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "/Users/tony/Freight_ai/loadmatch/venv/lib/python3.14/site-packages/httpcore/_synchronization.py", line 30, in current_async_library
+    environment = sniffio.current_async_library()
+  File "/Users/tony/Freight_ai/loadmatch/venv/lib/python3.14/site-packages/sniffio/_impl.py", line 93, in current_async_library
+    raise AsyncLibraryNotFoundError(
+        "unknown async library, or not in async context"
+    )
+sniffio._impl.AsyncLibraryNotFoundError: unknown async library, or not in async context
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/tony/Freight_ai/loadmatch/test_execution_trace.py", line 183, in <module>
+    asyncio.run(run_tests())
+    ~~~~~~~~~~~^^^^^^^^^^^^^
+  File "/Users/tony/Freight_ai/loadmatch/venv/lib/python3.14/site-packages/nest_asyncio.py", line 30, in run
+    return loop.run_until_complete(task)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "/Users/tony/Freight_ai/loadmatch/venv/lib/python3.14/site-packages/nest_asyncio.py", line 98, in run_until_complete
+    return f.result()
+           ~~~~~~~~^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.2/Frameworks/Python.framework/Versions/3.14/lib/python3.14/asyncio/futures.py", line 208, in result
+    raise self._exception.with_traceback(self._exception_tb)
+  File "/opt/homebrew/Cellar/python@3.14/3.14.2/Frameworks/Python.framework/Versions/3.14/lib/python3.14/asyncio/tasks.py", line 289, in __step_run_and_handle_result
+    result = coro.send(None)
+  File "/Users/tony/Freight_ai/loadmatch/test_execution_trace.py", line 100, in run_tests
+    await simulate_webhook(db, {
+    ...<5 lines>...
+    })
+  File "/Users/tony/Freight_ai/loadmatch/test_execution_trace.py", line 87, in simulate_webhook
+    await receive_webhook(request=request, db=db_session)
+  File "/Users/tony/Freight_ai/loadmatch/app/routers/webhook.py", line 252, in receive_webhook
+    await build_response(
+    ...<8 lines>...
+    )
+  File "/Users/tony/Freight_ai/loadmatch/app/routers/webhook.py", line 57, in build_response
+    await send_interactive_buttons(phone, text[:MAX_MESSAGE_LENGTH], buttons)
+  File "/Users/tony/Freight_ai/loadmatch/app/services/whatsapp_service.py", line 99, in send_interactive_buttons
+    async with httpx.AsyncClient() as client:
+               ~~~~~~~~~~~~~~~~~^^
+  File "/Users/tony/Freight_ai/loadmatch/venv/lib/python3.14/site-packages/httpx/_client.py", line 2016, in __aexit__
+    await self._transport.__aexit__(exc_type, exc_value, traceback)
+  File "/Users/tony/Freight_ai/loadmatch/venv/lib/python3.14/site-packages/httpx/_transports/default.py", line 372, in __aexit__
+    await self._pool.__aexit__(exc_type, exc_value, traceback)
+  File "/Users/tony/Freight_ai/loadmatch/venv/lib/python3.14/site-packages/httpcore/_async/connection_pool.py", line 364, in __aexit__
+    await self.aclose()
+  File "/Users/tony/Freight_ai/loadmatch/venv/lib/python3.14/site-packages/httpcore/_async/connection_pool.py", line 353, in aclose
+    await self._close_connections(closing_connections)
+  File "/Users/tony/Freight_ai/loadmatch/venv/lib/python3.14/site-packages/httpcore/_async/connection_pool.py", line 343, in _close_connections
+    with AsyncShieldCancellation():
+         ~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/Users/tony/Freight_ai/loadmatch/venv/lib/python3.14/site-packages/httpcore/_synchronization.py", line 203, in __init__
+    self._backend = current_async_library()
+                    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "/Users/tony/Freight_ai/loadmatch/venv/lib/python3.14/site-packages/httpcore/_synchronization.py", line 30, in current_async_library
+    environment = sniffio.current_async_library()
+  File "/Users/tony/Freight_ai/loadmatch/venv/lib/python3.14/site-packages/sniffio/_impl.py", line 93, in current_async_library
+    raise AsyncLibraryNotFoundError(
+        "unknown async library, or not in async context"
+    )
+sniffio._impl.AsyncLibraryNotFoundError: unknown async library, or not in async context

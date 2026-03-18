@@ -3,7 +3,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
-from app.models.user import User, UserRole, KycStatus
+from app.models.user import User
+from app.models.enums import UserRole, KycFlowState
 from app.models.truck import Truck, TruckType
 from app.models.listing import TruckSpaceListing, ListingStatus
 from app.models.load_request import LoadRequest, LoadRequestStatus
@@ -22,7 +23,7 @@ def run_test():
         phone="919876543210", 
         name="Rahul Transporter", 
         role=UserRole.transporter,
-        kyc_status=KycStatus.verified
+        kyc_flow_state=KycFlowState.verified
     )
     db.add(transporter)
     db.flush()
@@ -57,7 +58,7 @@ def run_test():
         phone="919988776655",
         name="Amit Shipper",
         role=UserRole.shipper,
-        kyc_status=KycStatus.pending
+        kyc_flow_state=KycFlowState.not_started
     )
     db.add(shipper)
     db.flush()

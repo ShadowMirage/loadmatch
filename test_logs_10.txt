@@ -1,0 +1,161 @@
+
+============================================================
+🧪 TEST: hello
+============================================================
+[1] detect_spam → PASS
+[2] normalize_input → hello
+[3] greeting_check → triggered
+[4] state_before → MAIN_MENU
+[5] extraction → None
+[6] inferred_action → greeting
+[7] validation → PASS (greeting)
+[8] routing → build_response
+[9] db_operation → None
+[10] response → 👋 Welcome to LoadMatch
+
+============================================================
+🧪 TEST: 7 tons cotton from jaipur to gwalior
+============================================================
+[1] detect_spam → PASS
+[2] normalize_input → 7 tons cotton from jaipur to gwalior
+[3] greeting_check → skipped
+[4] state_before → MAIN_MENU
+Claude API failure phone=919999999999 err=Timeout should be used inside a task
+Traceback (most recent call last):
+  File "/Users/tony/Freight_ai/loadmatch/app/services/chatbot_service.py", line 261, in handle_message
+    response = await asyncio.wait_for(
+               ^^^^^^^^^^^^^^^^^^^^^^^
+    ...<8 lines>...
+    )
+    ^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.2/Frameworks/Python.framework/Versions/3.14/lib/python3.14/asyncio/tasks.py", line 487, in wait_for
+    async with timeouts.timeout(timeout):
+               ~~~~~~~~~~~~~~~~^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.2/Frameworks/Python.framework/Versions/3.14/lib/python3.14/asyncio/timeouts.py", line 88, in __aenter__
+    raise RuntimeError("Timeout should be used inside a task")
+RuntimeError: Timeout should be used inside a task
+/Users/tony/Freight_ai/loadmatch/app/services/chatbot_service.py:309: RuntimeWarning: coroutine 'AsyncMockMixin._execute_mock_call' was never awaited
+  return ("⚠️ Temporary issue. Please try again in a moment.", None)
+RuntimeWarning: Enable tracemalloc to get the object allocation traceback
+[5] extraction → None
+[6] inferred_action → general_chat
+[7] validation → PASS (general chat)
+[8] routing → build_response
+[9] db_operation → None
+[10] response → ⚠️ Temporary issue. Please try again in a moment.
+
+============================================================
+🧪 TEST: jaipur se gwalior 5 ton kal
+============================================================
+[1] detect_spam → PASS
+[2] normalize_input → jaipur to gwalior 5 ton tomorrow
+[3] greeting_check → skipped
+[4] state_before → MAIN_MENU
+Claude API failure phone=919999999999 err=Timeout should be used inside a task
+Traceback (most recent call last):
+  File "/Users/tony/Freight_ai/loadmatch/app/services/chatbot_service.py", line 261, in handle_message
+    response = await asyncio.wait_for(
+               ^^^^^^^^^^^^^^^^^^^^^^^
+    ...<8 lines>...
+    )
+    ^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.2/Frameworks/Python.framework/Versions/3.14/lib/python3.14/asyncio/tasks.py", line 487, in wait_for
+    async with timeouts.timeout(timeout):
+               ~~~~~~~~~~~~~~~~^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.2/Frameworks/Python.framework/Versions/3.14/lib/python3.14/asyncio/timeouts.py", line 88, in __aenter__
+    raise RuntimeError("Timeout should be used inside a task")
+RuntimeError: Timeout should be used inside a task
+[5] extraction → None
+[6] inferred_action → general_chat
+[7] validation → PASS (general chat)
+[8] routing → build_response
+[9] db_operation → None
+[10] response → ⚠️ Temporary issue. Please try again in a moment.
+
+============================================================
+🧪 TEST: click: Delivery Status
+============================================================
+[1] detect_spam → PASS
+[2] normalize_input → Delivery Status
+[3] greeting_check → skipped
+[4] state_before → (interactive)
+[5] extraction → None
+[6] inferred_action → Delivery Status
+[7] validation → PASS (interactive)
+[8] routing → route_interactive_payload(Delivery Status)
+[9] db_operation → (delegated)
+[10] response → (interactive menu)
+
+============================================================
+🧪 TEST: 5 ton (partial weight only)
+============================================================
+[1] detect_spam → PASS
+[2] normalize_input → 5 ton
+[3] greeting_check → skipped
+[4] state_before → MAIN_MENU
+Claude API failure phone=919999999999 err=Timeout should be used inside a task
+Traceback (most recent call last):
+  File "/Users/tony/Freight_ai/loadmatch/app/services/chatbot_service.py", line 261, in handle_message
+    response = await asyncio.wait_for(
+               ^^^^^^^^^^^^^^^^^^^^^^^
+    ...<8 lines>...
+    )
+    ^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.2/Frameworks/Python.framework/Versions/3.14/lib/python3.14/asyncio/tasks.py", line 487, in wait_for
+    async with timeouts.timeout(timeout):
+               ~~~~~~~~~~~~~~~~^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.2/Frameworks/Python.framework/Versions/3.14/lib/python3.14/asyncio/timeouts.py", line 88, in __aenter__
+    raise RuntimeError("Timeout should be used inside a task")
+RuntimeError: Timeout should be used inside a task
+[5] extraction → None
+[6] inferred_action → general_chat
+[7] validation → PASS (general chat)
+[8] routing → build_response
+[9] db_operation → None
+[10] response → ⚠️ Temporary issue. Please try again in a moment.
+
+============================================================
+🧪 TEST: RJ14AB1234 (truck plate)
+============================================================
+[1] detect_spam → PASS
+[2] normalize_input → rj14ab1234
+[3] greeting_check → skipped
+[4] state_before → MAIN_MENU
+Claude API failure phone=919999999999 err=Timeout should be used inside a task
+Traceback (most recent call last):
+  File "/Users/tony/Freight_ai/loadmatch/app/services/chatbot_service.py", line 261, in handle_message
+    response = await asyncio.wait_for(
+               ^^^^^^^^^^^^^^^^^^^^^^^
+    ...<8 lines>...
+    )
+    ^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.2/Frameworks/Python.framework/Versions/3.14/lib/python3.14/asyncio/tasks.py", line 487, in wait_for
+    async with timeouts.timeout(timeout):
+               ~~~~~~~~~~~~~~~~^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.2/Frameworks/Python.framework/Versions/3.14/lib/python3.14/asyncio/timeouts.py", line 88, in __aenter__
+    raise RuntimeError("Timeout should be used inside a task")
+RuntimeError: Timeout should be used inside a task
+[5] extraction → None
+[6] inferred_action → general_chat
+[7] validation → PASS (general chat)
+[8] routing → build_response
+[9] db_operation → None
+[10] response → ⚠️ Temporary issue. Please try again in a moment.
+
+============================================================
+🧪 TEST: image upload (KYC)
+============================================================
+[1] detect_spam → PASS
+[2] normalize_input → image_upload
+[3] greeting_check → skipped
+[4] state_before → kyc_flow
+[5] extraction → fake_media_id_12345
+[6] inferred_action → upload_image
+[7] validation → PASS (kyc_flow)
+[8] routing → handle_kyc_image
+[9] db_operation → (delegated)
+[10] response → ✅ KYC document received or ⚠️ Error
+
+============================================================
+✅ All 7 tests complete.
+============================================================

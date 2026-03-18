@@ -1,0 +1,80 @@
+{
+  "summary": {
+    "passed": 14,
+    "total": 14,
+    "failed": 0,
+    "verdict": "\u2705 CHAOS SURVIVED \u2014 System is resilient"
+  },
+  "tests": [
+    {
+      "label": "C1: AI returns malformed JSON",
+      "passed": true,
+      "crash": ""
+    },
+    {
+      "label": "C1b: AI returns empty content array",
+      "passed": true,
+      "crash": ""
+    },
+    {
+      "label": "C1c: AI raises RuntimeError",
+      "passed": true,
+      "crash": ""
+    },
+    {
+      "label": "C2: WhatsApp API returns 400",
+      "passed": true,
+      "crash": ""
+    },
+    {
+      "label": "C3: WhatsApp API returns 500",
+      "passed": true,
+      "crash": ""
+    },
+    {
+      "label": "C4: S3 upload fails (KYC image)",
+      "passed": true,
+      "crash": ""
+    },
+    {
+      "label": "C5: DB commit fails mid-flow",
+      "passed": true,
+      "crash": ""
+    },
+    {
+      "label": "C6: Messy input 'jaipur se delhi kal 5 ton'",
+      "passed": true,
+      "crash": ""
+    },
+    {
+      "label": "C7: Junk input 'truck RJ14??'",
+      "passed": true,
+      "crash": ""
+    },
+    {
+      "label": "C8: Nonsense 'send anything bro'",
+      "passed": true,
+      "crash": ""
+    },
+    {
+      "label": "C9: SQL injection attempt",
+      "passed": true,
+      "crash": ""
+    },
+    {
+      "label": "C10: Extremely long message (10,000 chars)",
+      "passed": true,
+      "crash": ""
+    },
+    {
+      "label": "C11: Empty string input",
+      "passed": true,
+      "crash": ""
+    },
+    {
+      "label": "C12: Unicode / emoji bomb input",
+      "passed": true,
+      "crash": ""
+    }
+  ]
+}

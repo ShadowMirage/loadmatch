@@ -1,16 +1,9 @@
 import uuid
-from enum import Enum
-from sqlalchemy import Column, String, Integer, Numeric, Date, DateTime, ForeignKey, Text, func, Enum as SQLEnum
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import Column, String, Integer, Numeric, Date, DateTime, ForeignKey, Text, func, Enum as SQLEnum, Index
+from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import relationship
 from app.database import Base
-
-class ListingStatus(str, Enum):
-    open = "open"
-    partial = "partial"
-    full = "full"
-    completed = "completed"
-    cancelled = "cancelled"
+from app.models.enums import ListingStatus
 
 class TruckSpaceListing(Base):
     __tablename__ = "truck_space_listings"
@@ -23,9 +16,11 @@ class TruckSpaceListing(Base):
     departure_date = Column(Date, nullable=False)
     total_capacity_kg = Column(Integer, nullable=False)
     available_capacity_kg = Column(Integer, nullable=False)
+    allowed_categories = Column(JSONB, nullable=True)
     price_per_kg = Column(Numeric(10, 2), nullable=False)
     status = Column(SQLEnum(ListingStatus), default=ListingStatus.open, nullable=False)
     notes = Column(Text, nullable=True)
+    expires_at = Column(DateTime(timezone=True), nullable=True, index=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     truck = relationship("Truck", back_populates="listings")

@@ -30,6 +30,3 @@ services:
 
 volumes:
   postgres_data:
-
-curl "https://hecht-nonsimilar-glenda.ngrok-free.dev/webhook?hub.mode=subscribe&hub.verify_token=YOUR_REAL_VERIFY_TOKEN&hub.challenge=123"
-

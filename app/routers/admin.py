@@ -1,3 +1,4 @@
+import datetime
 from fastapi import APIRouter, Depends, Header, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import func
@@ -5,11 +6,14 @@ from pydantic import BaseModel
 
 from app.database import get_db
 from app.config import settings
-from app.models.user import User, KycStatus, UserRole
-from app.models.kyc import KycDocument, DocType
-from app.models.match import Match, MatchStatus
-from app.models.listing import TruckSpaceListing, ListingStatus
-from app.models.load_request import LoadRequest, LoadRequestStatus
+from app.models.enums import UserRole, KycFlowState, DocType, MatchStatus, ListingStatus, LoadRequestStatus
+from app.models.user import User
+from app.models.kyc import KycDocument
+from app.models.match import Match
+from app.models.listing import TruckSpaceListing
+from app.models.load_request import LoadRequest
+from app.models.truck import Truck
+from app.models.event import EventLog
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
 
@@ -54,7 +58,7 @@ def verify_kyc_document(doc_id: str, db: Session = Depends(get_db), admin_key: s
     
     # Check if user has at least one verified document
     # (Since we just set this one to True, it should be at least 1, but we can just set it)
-    user.kyc_status = KycStatus.verified
+    user.kyc_flow_state = KycFlowState.verified
     db.commit()
         
     return {
@@ -75,7 +79,7 @@ def reject_kyc_document(doc_id: str, payload: RejectReason, db: Session = Depend
     user = db.query(User).filter(User.id == doc.user_id).first()
     
     doc.rejection_reason = payload.reason
-    user.kyc_status = KycStatus.rejected
+    user.kyc_flow_state = KycFlowState.rejected
     db.commit()
     
     return {
@@ -116,32 +120,115 @@ def get_recent_matches(db: Session = Depends(get_db), admin_key: str = Depends(v
         
     return results
 
+@router.get("/active-loads")
+def get_active_loads(db: Session = Depends(get_db), admin_key: str = Depends(verify_admin_key)):
+    loads = db.query(LoadRequest, User).join(User, LoadRequest.shipper_id == User.id).filter(
+        LoadRequest.status == LoadRequestStatus.open
+    ).order_by(LoadRequest.created_at.desc()).all()
+    
+    return [
+        {
+            "id": str(load.id),
+            "shipper_phone": user.phone,
+            "route": f"{load.from_city} -> {load.to_city}",
+            "weight_kg": load.weight_kg,
+            "category": load.category.value if load.category else None,
+            "pickup_date": load.pickup_date.isoformat(),
+            "created_at": load.created_at.isoformat()
+        } for load, user in loads
+    ]
+
+@router.get("/active-trucks")
+def get_active_trucks(db: Session = Depends(get_db), admin_key: str = Depends(verify_admin_key)):
+    trucks = db.query(TruckSpaceListing, User, Truck).join(
+        User, TruckSpaceListing.owner_id == User.id
+    ).join(
+        Truck, TruckSpaceListing.truck_id == Truck.id
+    ).filter(
+        TruckSpaceListing.status == ListingStatus.open
+    ).order_by(TruckSpaceListing.created_at.desc()).all()
+    
+    return [
+        {
+            "id": str(listing.id),
+            "transporter_phone": user.phone,
+            "truck_number": truck.registration_number,
+            "route": f"{listing.from_city} -> {listing.to_city}",
+            "available_capacity_kg": listing.available_capacity_kg,
+            "price_per_kg": float(listing.price_per_kg),
+            "departure_date": listing.departure_date.isoformat(),
+            "created_at": listing.created_at.isoformat()
+        } for listing, user, truck in trucks
+    ]
+
+@router.get("/matches")
+def get_all_matches(db: Session = Depends(get_db), admin_key: str = Depends(verify_admin_key)):
+    matches = db.query(Match, LoadRequest, TruckSpaceListing).join(
+        LoadRequest, Match.load_request_id == LoadRequest.id
+    ).join(
+        TruckSpaceListing, Match.listing_id == TruckSpaceListing.id
+    ).order_by(Match.matched_at.desc()).limit(50).all()
+    
+    return [
+        {
+            "id": str(m.id),
+            "status": m.status.value,
+            "route": f"{l.from_city} -> {l.to_city}",
+            "weight_kg": l.weight_kg,
+            "price_per_kg": float(t.price_per_kg),
+            "matched_at": m.matched_at.isoformat()
+        } for m, l, t in matches
+    ]
+
 @router.get("/stats")
 def get_stats(db: Session = Depends(get_db), admin_key: str = Depends(verify_admin_key)):
     # User Stats
-    total_users = db.query(User).count()
-    verified_users = db.query(User).filter(User.kyc_status == KycStatus.verified).count()
-    pending_kyc_users = db.query(User).filter(User.kyc_status == KycStatus.pending).count()
+    users = db.query(User).count()
+    verified_users = db.query(User).filter(User.kyc_flow_state == KycFlowState.verified).count()
+    pending_kyc = db.query(User).filter(User.kyc_flow_state == KycFlowState.under_review).count()
     
     # Platform Stats
-    total_load_requests = db.query(LoadRequest).filter(
-        LoadRequest.status == LoadRequestStatus.open
-    ).count()
+    loads = db.query(LoadRequest).count()
+    trucks = db.query(TruckSpaceListing).count()
+    matches = db.query(Match).count()
     
-    total_listings = db.query(TruckSpaceListing).filter(
-        TruckSpaceListing.status == ListingStatus.open
-    ).count()
+    active_matches = db.query(Match).filter(Match.status.in_([MatchStatus.pending, MatchStatus.accepted, MatchStatus.confirmed, MatchStatus.suggested])).count()
     
-    # Matches Stats
-    total_matches_suggested = db.query(Match).filter(Match.status == MatchStatus.suggested).count()
-    total_matches_accepted = db.query(Match).filter(Match.status == MatchStatus.accepted).count()
+    # Today's Stats
+    today = datetime.datetime.now().date()
+    today_loads = db.query(LoadRequest).filter(func.date(LoadRequest.created_at) == today).count()
+    today_trucks = db.query(TruckSpaceListing).filter(func.date(TruckSpaceListing.created_at) == today).count()
+    today_matches = db.query(Match).filter(func.date(Match.matched_at) == today).count()
     
     return {
-        "total_users": total_users,
+        "users": users,
         "verified_users": verified_users,
-        "pending_kyc_users": pending_kyc_users,
-        "total_load_requests": total_load_requests,
-        "total_listings": total_listings,
-        "total_matches_suggested": total_matches_suggested,
-        "total_matches_accepted": total_matches_accepted
+        "pending_kyc": pending_kyc,
+        "loads": loads,
+        "trucks": trucks,
+        "matches": matches,
+        "active_matches": active_matches,
+        "today_loads": today_loads,
+        "today_trucks": today_trucks,
+        "today_matches": today_matches
     }
+
+@router.get("/events")
+def get_recent_events(db: Session = Depends(get_db), admin_key: str = Depends(verify_admin_key), limit: int = 50):
+    events = (
+        db.query(EventLog, User)
+        .outerjoin(User, EventLog.user_id == User.id)
+        .order_by(EventLog.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+    
+    return [
+        {
+            "id": str(evt.id),
+            "event_type": evt.event_type,
+            "user_phone": user.phone if user else "System",
+            "data": evt.data,
+            "created_at": evt.created_at.isoformat()
+        } for evt, user in events
+    ]

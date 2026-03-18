@@ -1,0 +1,7 @@
+Traceback (most recent call last):
+  File "/Users/tony/Freight_ai/loadmatch/test_execution_trace.py", line 29, in <module>
+    from app.routers.webhook import receive_webhook
+  File "/Users/tony/Freight_ai/loadmatch/app/routers/webhook.py", line 450
+    return {"status": "ok"}
+    ^^^^^^^^^^^^^^^^^^^^^^^
+SyntaxError: 'return' outside function

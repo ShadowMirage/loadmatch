@@ -1,14 +1,16 @@
 import datetime
 from sqlalchemy.orm import Session
 
-from app.models.user import User, UserRole, KycStatus
-from app.models.load_request import LoadRequest, LoadRequestStatus
-from app.models.truck import Truck, TruckType
-from app.models.listing import TruckSpaceListing, ListingStatus
-from app.models.match import Match, MatchStatus
-from app.models.kyc import KycDocument, DocType
+from app.models.enums import UserRole, KycFlowState, LoadRequestStatus, TruckType, ListingStatus, MatchStatus, DocType
+from app.models.user import User
+from app.models.load_request import LoadRequest
+from app.models.truck import Truck
+from app.models.listing import TruckSpaceListing
+from app.models.match import Match
+from app.models.kyc import KycDocument
 from app.services.matching_service import find_matches_for_load, update_listing_capacity_after_match
 from app.services.storage_service import upload_whatsapp_media
+from app.services.location_service import normalize_city
 
 TOOLS = [
     {
@@ -33,6 +35,7 @@ TOOLS = [
                 "to_city": {"type": "string", "description": "Destination city"},
                 "pickup_date": {"type": "string", "description": "Pickup date as YYYY-MM-DD"},
                 "weight_kg": {"type": "integer", "description": "Total weight of the goods in kg"},
+                "category": {"type": "string", "description": "Cargo Category string e.g. 'steel', 'chemicals', 'food', 'fragile', 'hazardous'"},
                 "goods_type": {"type": "string", "description": "Description of the goods"},
                 "budget_per_kg": {"type": "number", "description": "Maximum budget per kg"}
             },
@@ -49,6 +52,7 @@ TOOLS = [
                 "from_city": {"type": "string", "description": "Origin city"},
                 "to_city": {"type": "string", "description": "Destination city"},
                 "departure_date": {"type": "string", "description": "Departure date as YYYY-MM-DD"},
+                "allowed_categories": {"type": "array", "items": {"type": "string"}, "description": "Cargo categories accepted by truck, e.g. ['steel', 'cement']"},
                 "available_capacity_kg": {"type": "integer", "description": "Available capacity in kg"},
                 "price_per_kg": {"type": "number", "description": "Price per kg for the available space"}
             },
@@ -115,13 +119,17 @@ async def execute_tool(name: str, args: dict, db: Session, user: User) -> dict:
         return {"status": "success", "message": f"Profile updated. Name: {user.name}, Role: {user.role.value}"}
 
     elif name == "create_load_request":
+        if user.kyc_flow_state != KycFlowState.verified:
+            return {"error": "User is not KYC verified. Ask them to press 'Upload KYC' from the Main Menu to verify their identity before creating loads."}
+            
         pickup_date = datetime.datetime.strptime(args["pickup_date"], "%Y-%m-%d").date()
         load = LoadRequest(
             shipper_id=user.id,
-            from_city=args["from_city"],
-            to_city=args["to_city"],
+            from_city=normalize_city(args["from_city"]),
+            to_city=normalize_city(args["to_city"]),
             pickup_date=pickup_date,
             weight_kg=args["weight_kg"],
+            category=args.get("category"),
             goods_type=args.get("goods_type"),
             budget_per_kg=args.get("budget_per_kg")
         )
@@ -129,7 +137,20 @@ async def execute_tool(name: str, args: dict, db: Session, user: User) -> dict:
         db.commit()
         db.refresh(load)
         
+        from app.services.event_logger import track_event
+        # Set expires_at to end of pickup_date
+        import datetime as _dt
+        load.expires_at = _dt.datetime.combine(load.pickup_date, _dt.time.max).replace(tzinfo=_dt.timezone.utc)
+        track_event(db, user.id, "LOAD_CREATED", {"load_id": str(load.id), "route": f"{load.from_city}->{load.to_city}"})
+        
         matches = find_matches_for_load(db, load)
+        
+        # Supply Visibility Ping — notify relevant trucks and subscribers
+        try:
+            from app.services.supply_visibility_service import notify_on_load_created
+            await notify_on_load_created(db, load)
+        except Exception as _svp_err:
+            import logging as _log; _log.getLogger(__name__).warning("SVP error: %s", _svp_err)
         
         return {
             "status": "success", 
@@ -138,6 +159,9 @@ async def execute_tool(name: str, args: dict, db: Session, user: User) -> dict:
         }
 
     elif name == "create_truck_listing":
+        if user.kyc_flow_state != KycFlowState.verified:
+            return {"error": "User is not KYC verified. Ask them to press 'Upload KYC' from the Main Menu to verify their identity before posting truck listings."}
+            
         registration_number = args["registration_number"]
         truck = db.query(Truck).filter(
             Truck.registration_number == registration_number,
@@ -158,9 +182,10 @@ async def execute_tool(name: str, args: dict, db: Session, user: User) -> dict:
         listing = TruckSpaceListing(
             truck_id=truck.id,
             owner_id=user.id,
-            from_city=args["from_city"],
-            to_city=args["to_city"],
+            from_city=normalize_city(args["from_city"]),
+            to_city=normalize_city(args["to_city"]),
             departure_date=departure_date,
+            allowed_categories=args.get("allowed_categories", []),
             total_capacity_kg=truck.total_capacity_kg,
             available_capacity_kg=args["available_capacity_kg"],
             price_per_kg=args["price_per_kg"]
@@ -168,6 +193,48 @@ async def execute_tool(name: str, args: dict, db: Session, user: User) -> dict:
         db.add(listing)
         db.commit()
         db.refresh(listing)
+        
+        from app.services.event_logger import track_event
+        # Set expires_at to end of departure_date
+        import datetime as _dt
+        listing.expires_at = _dt.datetime.combine(listing.departure_date, _dt.time.max).replace(tzinfo=_dt.timezone.utc)
+        track_event(db, user.id, "TRUCK_LISTED", {"listing_id": str(listing.id), "route": f"{listing.from_city}->{listing.to_city}"})
+        
+        # Supply Visibility Ping — notify shippers and subscribers
+        try:
+            from app.services.supply_visibility_service import notify_on_truck_listed
+            await notify_on_truck_listed(db, listing)
+        except Exception as _svp_err:
+            import logging as _log; _log.getLogger(__name__).warning("SVP error: %s", _svp_err)
+        
+        # Backhaul Matching Logic
+        from app.services.route_corridors import is_in_corridor
+        from app.services.whatsapp_service import send_text
+        
+        backhaul_loads = db.query(LoadRequest).filter(
+            LoadRequest.status == LoadRequestStatus.open,
+            LoadRequest.from_city == listing.to_city
+        ).all()
+        
+        valid_backhauls = []
+        for bl in backhaul_loads:
+            # Corridor check returning to origin
+            if is_in_corridor(bl.from_city, bl.to_city, listing.to_city, listing.from_city):
+                # Capacity wrapper limit check
+                if bl.weight_kg <= listing.total_capacity_kg:
+                    # Category check
+                    if bl.category:
+                        cat_str = bl.category.value if hasattr(bl.category, 'value') else str(bl.category)
+                        if listing.allowed_categories and cat_str not in listing.allowed_categories:
+                            continue
+                    valid_backhauls.append(bl)
+                    
+        if valid_backhauls:
+            msg = "⚡ *Backhaul opportunities predicted:*\n"
+            for bl in valid_backhauls[:3]:
+                msg += f"• {bl.from_city.title()} → {bl.to_city.title()} ({bl.weight_kg} kg)\n"
+            await send_text(user.phone, msg)
+            track_event(db, user.id, "BACKHAUL_MATCH_SUGGESTED", {"count": len(valid_backhauls)})
         
         return {
             "status": "success",
@@ -221,6 +288,9 @@ async def execute_tool(name: str, args: dict, db: Session, user: User) -> dict:
         return matches
 
     elif name == "accept_match":
+        if user.kyc_flow_state != KycFlowState.verified:
+            return {"error": "User is not KYC verified. Ask them to press 'Upload KYC' from the Main Menu to verify their identity before confirming matches."}
+            
         match = db.query(Match).filter(Match.id == args["match_id"]).first()
         if not match:
             return {"error": "Match not found"}
@@ -237,6 +307,8 @@ async def execute_tool(name: str, args: dict, db: Session, user: User) -> dict:
             
         if match.shipper_confirmed and match.transporter_confirmed:
             update_listing_capacity_after_match(db, str(match.id))
+            from app.services.event_logger import track_event
+            track_event(db, user.id, "MATCH_CONFIRMED", {"match_id": str(match.id)})
             return {"status": "success", "message": "Match fully accepted and confirmed by both parties", "match_status": match.status.value}
             
         db.commit()
@@ -257,8 +329,11 @@ async def execute_tool(name: str, args: dict, db: Session, user: User) -> dict:
             )
             
             db.add(kyc_doc)
-            user.kyc_status = KycStatus.under_review
+            user.kyc_flow_state = KycFlowState.under_review
             db.commit()
+            
+            from app.services.event_logger import track_event
+            track_event(db, user.id, "KYC_UPLOADED", {"doc_type": args["doc_type"]})
             
             return {
                 "status": "success",

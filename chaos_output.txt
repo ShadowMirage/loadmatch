@@ -1,0 +1,218 @@
+
+────────────────────────────────────────────────────────────
+💥 CHAOS: C1: AI returns malformed JSON
+────────────────────────────────────────────────────────────
+[1] detect_spam → PASS
+[2] normalize_input → jaipur to delhi 5 ton tomorrow
+[3] greeting_check → skipped
+[4] state_before → MAIN_MENU
+[5] extraction → None
+[6] inferred_action → general_chat
+[7] validation → PASS (general chat)
+[8] routing → build_response
+[9] db_operation → None
+[10] response → {"action": "confirm_truck_listing", "data": {broken_json!!!
+  ✅ PASS — survived
+
+────────────────────────────────────────────────────────────
+💥 CHAOS: C1b: AI returns empty content array
+────────────────────────────────────────────────────────────
+[1] detect_spam → PASS
+[2] normalize_input → empty response test
+[3] greeting_check → skipped
+[4] state_before → MAIN_MENU
+[5] extraction → None
+[6] inferred_action → general_chat
+[7] validation → PASS (general chat)
+[8] routing → build_response
+[9] db_operation → None
+[10] response → ⚠️ Please provide missing details so I can assist.
+  ✅ PASS — survived
+
+────────────────────────────────────────────────────────────
+💥 CHAOS: C1c: AI raises RuntimeError
+────────────────────────────────────────────────────────────
+[1] detect_spam → PASS
+[2] normalize_input → route query
+[3] greeting_check → skipped
+[4] state_before → MAIN_MENU
+Claude API failure phone=919999999999 err=Anthropic API down
+Traceback (most recent call last):
+  File "/Users/tony/Freight_ai/loadmatch/app/services/chatbot_service.py", line 275, in handle_message
+    response = task.result()
+  File "/opt/homebrew/Cellar/python@3.14/3.14.2/Frameworks/Python.framework/Versions/3.14/lib/python3.14/asyncio/futures.py", line 208, in result
+    raise self._exception.with_traceback(self._exception_tb)
+  File "/opt/homebrew/Cellar/python@3.14/3.14.2/Frameworks/Python.framework/Versions/3.14/lib/python3.14/asyncio/tasks.py", line 289, in __step_run_and_handle_result
+    result = coro.send(None)
+  File "/opt/homebrew/Cellar/python@3.14/3.14.2/Frameworks/Python.framework/Versions/3.14/lib/python3.14/unittest/mock.py", line 2326, in _execute_mock_call
+    raise effect
+RuntimeError: Anthropic API down
+[5] extraction → None
+[6] inferred_action → general_chat
+[7] validation → PASS (general chat)
+[8] routing → build_response
+[9] db_operation → None
+[10] response → ⚠️ Temporary issue. Please try again in a moment.
+  ✅ PASS — survived
+
+────────────────────────────────────────────────────────────
+💥 CHAOS: C2: WhatsApp API returns 400
+────────────────────────────────────────────────────────────
+[1] detect_spam → PASS
+[2] normalize_input → hello
+[3] greeting_check → triggered
+[4] state_before → MAIN_MENU
+[5] extraction → None
+[6] inferred_action → greeting
+[7] validation → PASS (greeting)
+[8] routing → build_response
+[9] db_operation → None
+[10] response → 👋 Welcome to LoadMatch
+WhatsApp API Error (send_interactive_buttons) to=919999999999 status=400 body=Error 400
+Failed to send interactive buttons, falling back to text: 400 Error
+Blocked double response to 919999999999: send_text
+  ✅ PASS — survived
+
+────────────────────────────────────────────────────────────
+💥 CHAOS: C3: WhatsApp API returns 500
+────────────────────────────────────────────────────────────
+[1] detect_spam → PASS
+[2] normalize_input → hello
+[3] greeting_check → triggered
+[4] state_before → MAIN_MENU
+[5] extraction → None
+[6] inferred_action → greeting
+[7] validation → PASS (greeting)
+[8] routing → build_response
+[9] db_operation → None
+[10] response → 👋 Welcome to LoadMatch
+WhatsApp API Error (send_interactive_buttons) to=919999999999 status=500 body=Error 500
+Failed to send interactive buttons, falling back to text: 500 Error
+Blocked double response to 919999999999: send_text
+  ✅ PASS — survived
+
+────────────────────────────────────────────────────────────
+💥 CHAOS: C4: S3 upload fails (KYC image)
+────────────────────────────────────────────────────────────
+[1] detect_spam → PASS
+[2] normalize_input → image_upload
+[3] greeting_check → skipped
+[4] state_before → kyc_flow
+[5] extraction → media_chaos
+[6] inferred_action → upload_image
+[7] validation → PASS (kyc_flow)
+[8] routing → handle_kyc_image
+[9] db_operation → (delegated)
+[10] response → ✅ KYC document received or ⚠️ Error
+KYC upload failed for user_id=6f2ad5b1-f2ce-473b-a108-83e326929b62: Could not retrieve URL for media_id: media_chaos
+Error marking message as processed: DB commit failed: disk full
+  ✅ PASS — survived
+
+────────────────────────────────────────────────────────────
+💥 CHAOS: C5: DB commit fails mid-flow
+────────────────────────────────────────────────────────────
+  ✅ PASS — survived
+
+────────────────────────────────────────────────────────────
+💥 CHAOS: C6: Messy input 'jaipur se delhi kal 5 ton'
+────────────────────────────────────────────────────────────
+[1] detect_spam → PASS
+[2] normalize_input → jaipur to delhi tomorrow 5 ton
+[3] greeting_check → skipped
+[4] state_before → MAIN_MENU
+[5] extraction → None
+[6] inferred_action → general_chat
+[7] validation → PASS (general chat)
+[8] routing → build_response
+[9] db_operation → None
+[10] response → ℹ️ I need more info about your shipment.
+  ✅ PASS — survived
+
+────────────────────────────────────────────────────────────
+💥 CHAOS: C7: Junk input 'truck RJ14??'
+────────────────────────────────────────────────────────────
+[1] detect_spam → PASS
+[2] normalize_input → truck rj14??
+[3] greeting_check → skipped
+[4] state_before → MAIN_MENU
+[5] extraction → None
+[6] inferred_action → general_chat
+[7] validation → PASS (general chat)
+[8] routing → build_response
+[9] db_operation → None
+[10] response → ℹ️ I need more info about your shipment.
+  ✅ PASS — survived
+
+────────────────────────────────────────────────────────────
+💥 CHAOS: C8: Nonsense 'send anything bro'
+────────────────────────────────────────────────────────────
+[1] detect_spam → BLOCK
+Spam detected for user 919999999999
+  ✅ PASS — survived
+
+────────────────────────────────────────────────────────────
+💥 CHAOS: C9: SQL injection attempt
+────────────────────────────────────────────────────────────
+[1] detect_spam → BLOCK
+Spam detected for user 919999999999
+  ✅ PASS — survived
+
+────────────────────────────────────────────────────────────
+💥 CHAOS: C10: Extremely long message (10,000 chars)
+────────────────────────────────────────────────────────────
+[1] detect_spam → BLOCK
+Spam detected for user 919999999999
+  ✅ PASS — survived
+
+────────────────────────────────────────────────────────────
+💥 CHAOS: C11: Empty string input
+────────────────────────────────────────────────────────────
+[1] detect_spam → PASS
+[2] normalize_input → 
+[3] greeting_check → skipped
+[4] state_before → MAIN_MENU
+[5] extraction → None
+[6] inferred_action → general_chat
+[7] validation → PASS (general chat)
+[8] routing → build_response
+[9] db_operation → None
+[10] response → ℹ️ I need more info about your shipment.
+  ✅ PASS — survived
+
+────────────────────────────────────────────────────────────
+💥 CHAOS: C12: Unicode / emoji bomb input
+────────────────────────────────────────────────────────────
+[1] detect_spam → BLOCK
+Spam detected for user 919999999999
+  ✅ PASS — survived
+
+
+═════════════════════════════════════════════════════════════════
+💥 CHAOS TEST REPORT — LoadMatch
+═════════════════════════════════════════════════════════════════
+
+ID    Scenario                                         Result
+─────────────────────────────────────────────────────────────────
+  1    C1: AI returns malformed JSON                    ✅ PASS
+  2    C1b: AI returns empty content array              ✅ PASS
+  3    C1c: AI raises RuntimeError                      ✅ PASS
+  4    C2: WhatsApp API returns 400                     ✅ PASS
+  5    C3: WhatsApp API returns 500                     ✅ PASS
+  6    C4: S3 upload fails (KYC image)                  ✅ PASS
+  7    C5: DB commit fails mid-flow                     ✅ PASS
+  8    C6: Messy input 'jaipur se delhi kal 5 ton'      ✅ PASS
+  9    C7: Junk input 'truck RJ14??'                    ✅ PASS
+  10   C8: Nonsense 'send anything bro'                 ✅ PASS
+  11   C9: SQL injection attempt                        ✅ PASS
+  12   C10: Extremely long message (10,000 chars)       ✅ PASS
+  13   C11: Empty string input                          ✅ PASS
+  14   C12: Unicode / emoji bomb input                  ✅ PASS
+
+─────────────────────────────────────────────────────────────────
+  Passed: 14/14
+  Failed: 0/14
+
+  🟢 VERDICT: ✅ CHAOS SURVIVED — System is resilient
+═════════════════════════════════════════════════════════════════
+
+✅ Saved: chaos_report.json

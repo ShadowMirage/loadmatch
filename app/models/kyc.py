@@ -1,16 +1,9 @@
 import uuid
-from enum import Enum
 from sqlalchemy import Column, String, Boolean, DateTime, ForeignKey, Text, func, Enum as SQLEnum
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 from app.database import Base
-
-class DocType(str, Enum):
-    aadhaar = "aadhaar"
-    pan = "pan"
-    rc_book = "rc_book"
-    driving_license = "driving_license"
-    gst = "gst"
+from app.models.enums import DocType
 
 class KycDocument(Base):
     __tablename__ = "kyc_documents"

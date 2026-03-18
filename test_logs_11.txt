@@ -1,0 +1,102 @@
+
+============================================================
+🧪 TEST: hello
+============================================================
+[1] detect_spam → PASS
+[2] normalize_input → hello
+[3] greeting_check → triggered
+[4] state_before → MAIN_MENU
+[5] extraction → None
+[6] inferred_action → greeting
+[7] validation → PASS (greeting)
+[8] routing → build_response
+[9] db_operation → None
+[10] response → 👋 Welcome to LoadMatch
+
+============================================================
+🧪 TEST: 7 tons cotton from jaipur to gwalior
+============================================================
+[1] detect_spam → PASS
+[2] normalize_input → 7 tons cotton from jaipur to gwalior
+[3] greeting_check → skipped
+[4] state_before → MAIN_MENU
+[5] extraction → None
+[6] inferred_action → general_chat
+[7] validation → PASS (general chat)
+[8] routing → build_response
+[9] db_operation → None
+[10] response → ⚠️ Please provide missing details so I can assist.
+
+============================================================
+🧪 TEST: jaipur se gwalior 5 ton kal
+============================================================
+[1] detect_spam → PASS
+[2] normalize_input → jaipur to gwalior 5 ton tomorrow
+[3] greeting_check → skipped
+[4] state_before → MAIN_MENU
+[5] extraction → None
+[6] inferred_action → general_chat
+[7] validation → PASS (general chat)
+[8] routing → build_response
+[9] db_operation → None
+[10] response → ⚠️ Please provide missing details so I can assist.
+
+============================================================
+🧪 TEST: click: Delivery Status
+============================================================
+[1] detect_spam → PASS
+[2] normalize_input → Delivery Status
+[3] greeting_check → skipped
+[4] state_before → (interactive)
+[5] extraction → None
+[6] inferred_action → Delivery Status
+[7] validation → PASS (interactive)
+[8] routing → route_interactive_payload(Delivery Status)
+[9] db_operation → (delegated)
+[10] response → (interactive menu)
+
+============================================================
+🧪 TEST: 5 ton (partial weight only)
+============================================================
+[1] detect_spam → PASS
+[2] normalize_input → 5 ton
+[3] greeting_check → skipped
+[4] state_before → MAIN_MENU
+[5] extraction → None
+[6] inferred_action → general_chat
+[7] validation → PASS (general chat)
+[8] routing → build_response
+[9] db_operation → None
+[10] response → ⚠️ Please provide missing details so I can assist.
+
+============================================================
+🧪 TEST: RJ14AB1234 (truck plate)
+============================================================
+[1] detect_spam → PASS
+[2] normalize_input → rj14ab1234
+[3] greeting_check → skipped
+[4] state_before → MAIN_MENU
+[5] extraction → None
+[6] inferred_action → general_chat
+[7] validation → PASS (general chat)
+[8] routing → build_response
+[9] db_operation → None
+[10] response → ⚠️ Please provide missing details so I can assist.
+
+============================================================
+🧪 TEST: image upload (KYC)
+============================================================
+[1] detect_spam → PASS
+[2] normalize_input → image_upload
+[3] greeting_check → skipped
+[4] state_before → kyc_flow
+[5] extraction → fake_media_id_12345
+[6] inferred_action → upload_image
+[7] validation → PASS (kyc_flow)
+[8] routing → handle_kyc_image
+[9] db_operation → (delegated)
+[10] response → ✅ KYC document received or ⚠️ Error
+
+============================================================
+✅ All 7 tests complete.
+============================================================

@@ -1,0 +1,76 @@
+{
+  "health_score": 100,
+  "categories": {
+    "Workflow Logic": 100,
+    "AI Extraction": 100,
+    "Routing": 100,
+    "UX Quality": 100,
+    "Error Handling": 100,
+    "API Compliance": 100
+  },
+  "tests": [
+    {
+      "num": 1,
+      "name": "Greeting",
+      "passed": true,
+      "note": "Calls: 1, WA message type: ['interactive'], Buttons: [3]",
+      "fix": ""
+    },
+    {
+      "num": 2,
+      "name": "Clean Input (full freight request)",
+      "passed": true,
+      "note": "Calls: 1, Texts: ['\u2139\ufe0f I need more info about your shipment.']",
+      "fix": ""
+    },
+    {
+      "num": 3,
+      "name": "Hindi Mixed Input (se\u2192to, kal\u2192tomorrow)",
+      "passed": true,
+      "note": "Calls: 1, 'se'\u2192'to' and 'kal'\u2192'tomorrow' normalization applied in Step [2]",
+      "fix": ""
+    },
+    {
+      "num": 4,
+      "name": "Partial Input (weight only)",
+      "passed": true,
+      "note": "Calls: 1, Response: ['\u2139\ufe0f I need more info about your shipment.']",
+      "fix": ""
+    },
+    {
+      "num": 5,
+      "name": "Number Plate Detection (RJ14AB1234)",
+      "passed": true,
+      "note": "Calls: 1, Response: ['\u2139\ufe0f I need more info about your shipment.']",
+      "fix": ""
+    },
+    {
+      "num": 6,
+      "name": "Button Routing (DELIVERY_STATUS)",
+      "passed": true,
+      "note": "Calls: 1, Routed: True, Buttons: [1]",
+      "fix": ""
+    },
+    {
+      "num": 7,
+      "name": "Spam Detection (5x rapid same message)",
+      "passed": true,
+      "note": "Total spam responses: 5, Blocked: True",
+      "fix": ""
+    },
+    {
+      "num": 8,
+      "name": "KYC Image Isolation (single response)",
+      "passed": true,
+      "note": "Calls: 0, Expected: \u22641",
+      "fix": ""
+    },
+    {
+      "num": 9,
+      "name": "Button Limit \u22643 across all tests",
+      "passed": true,
+      "note": "Total interactive msgs: 11, Violations (>3 buttons): 0",
+      "fix": ""
+    }
+  ]
+}

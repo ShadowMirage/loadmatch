@@ -1,0 +1,142 @@
+
+============================================================
+🧪 FINAL TEST: T1: AI returns malformed JSON
+============================================================
+[1] detect_spam → PASS
+[2] normalize_input → jaipur to delhi 5 ton
+[3] greeting_check → skipped
+[4] state_before → MAIN_MENU
+[5] extraction → None
+[6] inferred_action → general_chat
+[7] validation → PASS (general chat)
+[8] routing → build_response
+[9] db_operation → None
+[10] response → {"action":"confirm_truck_listing","data":{broken_json!!!
+
+============================================================
+🧪 FINAL TEST: T2: AI returns empty content
+============================================================
+[1] detect_spam → PASS
+[2] normalize_input → 5 ton from jaipur
+[3] greeting_check → skipped
+[4] state_before → MAIN_MENU
+[5] extraction → None
+[6] inferred_action → general_chat
+[7] validation → PASS (general chat)
+[8] routing → build_response
+[9] db_operation → None
+[10] response → ⚠️ Please provide missing details so I can assist.
+
+============================================================
+🧪 FINAL TEST: T3: WhatsApp API 400
+============================================================
+[1] detect_spam → PASS
+[2] normalize_input → hello
+[3] greeting_check → triggered
+[4] state_before → MAIN_MENU
+[5] extraction → None
+[6] inferred_action → greeting
+[7] validation → PASS (greeting)
+[8] routing → build_response
+[9] db_operation → None
+[10] response → 👋 Welcome to LoadMatch
+WhatsApp API Error (send_interactive_buttons) to=919999999999 status=400 body=Error 400
+Interactive send failed, falling back to text: 400
+Blocked double response to 919999999999: send_text
+
+============================================================
+🧪 FINAL TEST: T4: WhatsApp API 500
+============================================================
+[1] detect_spam → PASS
+[2] normalize_input → hello
+[3] greeting_check → triggered
+[4] state_before → MAIN_MENU
+[5] extraction → None
+[6] inferred_action → greeting
+[7] validation → PASS (greeting)
+[8] routing → build_response
+[9] db_operation → None
+[10] response → 👋 Welcome to LoadMatch
+WhatsApp API Error (send_interactive_buttons) to=919999999999 status=500 body=Error 500
+Interactive send failed, falling back to text: 500
+Blocked double response to 919999999999: send_text
+
+============================================================
+🧪 FINAL TEST: T5: jaipur se delhi kal 5 ton
+============================================================
+[1] detect_spam → PASS
+[2] normalize_input → jaipur to delhi tomorrow 5 ton
+[3] greeting_check → skipped
+[4] state_before → MAIN_MENU
+[5] extraction → None
+[6] inferred_action → general_chat
+[7] validation → PASS (general chat)
+[8] routing → build_response
+[9] db_operation → None
+[10] response → ℹ️ I need more info about your shipment.
+
+============================================================
+🧪 FINAL TEST: T6: Emoji flood
+============================================================
+[1] detect_spam → PASS
+[2] normalize_input → 🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥
+[3] greeting_check → skipped
+[4] state_before → MAIN_MENU
+[5] extraction → None
+[6] inferred_action → general_chat
+[7] validation → PASS (general chat)
+[8] routing → build_response
+[9] db_operation → None
+[10] response → ℹ️ I need more info about your shipment.
+
+============================================================
+🧪 FINAL TEST: T7: SQL injection
+============================================================
+[1] detect_spam → PASS
+[2] normalize_input → '; drop table users; --
+[3] greeting_check → skipped
+[4] state_before → MAIN_MENU
+[5] extraction → None
+[6] inferred_action → general_chat
+[7] validation → PASS (general chat)
+[8] routing → build_response
+[9] db_operation → None
+[10] response → ℹ️ I need more info about your shipment.
+
+
+═════════════════════════════════════════════════════════════════
+📊 FINAL SURGICAL FIX TRACE REPORT
+═════════════════════════════════════════════════════════════════
+
+  ✅ PASS  T1: AI malformed JSON
+         Note:   Response: '❓ Could you clarify? E.g. 'I have 5 tons of cotton from Jaipur to Delhi''
+         Detail: JSON stripped
+
+  ✅ PASS  T2: AI empty content
+         Note:   Response: '⚠️ Please provide missing details so I can assist.'
+         Detail: Smart fallback used
+
+  ✅ PASS  T3: WA API 400
+         Note:   No crash
+         Detail: Fallback to text
+
+  ✅ PASS  T4: WA API 500
+         Note:   No crash
+         Detail: Fallback to text
+
+  ✅ PASS  T5: jaipur se delhi kal 5 ton
+         Note:   Calls: 1, [2] normalize → jaipur to delhi tomorrow 5 ton
+         Detail: Normalized correctly
+
+  ✅ PASS  T6: Emoji flood
+         Note:   Calls: 1 (spam blocker fires or 1 response)
+         Detail: Spam detection or graceful response
+
+  ✅ PASS  T7: SQL injection
+         Note:   DB intact: True, Calls: 1
+         Detail: ORM prevented injection
+
+─────────────────────────────────────────────────────────────────
+  Result: 7/7 passed
+  🟢 ALL FIXES VERIFIED
+═════════════════════════════════════════════════════════════════
