@@ -19,5 +19,10 @@ else
     exit 1
 fi
 
-echo "Starting application..."
-exec uvicorn app.main:app --host 0.0.0.0 --port 8000
+echo "Starting application with Gunicorn (4 workers)..."
+exec gunicorn app.main:app \
+  -k uvicorn.workers.UvicornWorker \
+  --workers 4 \
+  --bind 0.0.0.0:8000 \
+  --timeout 150 \
+  --log-level info

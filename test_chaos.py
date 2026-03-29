@@ -9,7 +9,6 @@ import secrets
 import json
 import traceback
 from datetime import datetime
-from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.types import TypeDecorator, String
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -26,7 +25,7 @@ mock_ai.messages.create = AsyncMock(return_value=mock_ai_response)
 _anthropic_patcher = patch('anthropic.AsyncAnthropic', return_value=mock_ai)
 _anthropic_patcher.start()
 
-from app.database import Base
+from app.database import build_engine, create_schema
 from app.models.user import User, UserRole
 from app.models.user_activity import UserActivity
 from app.models.conversation import Conversation
@@ -76,8 +75,8 @@ def _error_client(status_code):
     return c
 
 # ── DB ─────────────────────────────────────────────────────────────────────
-engine = create_engine("sqlite:///:memory:")
-Base.metadata.create_all(bind=engine)
+engine = build_engine("sqlite:///:memory:")
+create_schema(bind=engine)
 TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
@@ -107,8 +106,8 @@ def _make_body(msg, phone="919999999999"):
 
 
 async def run(db, text_body, phone="919999999999"):
-    from app.services import whatsapp_service
-    whatsapp_service.response_sent_var.set(False)
+    from app.services.whatsapp_service import reset_response_guard
+    reset_response_guard()
     req = MockRequest(_make_body({
         "id": secrets.token_hex(16),
         "timestamp": str(int(datetime.now().timestamp())),
@@ -119,8 +118,8 @@ async def run(db, text_body, phone="919999999999"):
 
 
 async def run_image(db, phone="919999999999"):
-    from app.services import whatsapp_service
-    whatsapp_service.response_sent_var.set(False)
+    from app.services.whatsapp_service import reset_response_guard
+    reset_response_guard()
     req = MockRequest(_make_body({
         "id": secrets.token_hex(16),
         "timestamp": str(int(datetime.now().timestamp())),

@@ -1,12 +1,14 @@
 import uuid
-from enum import Enum
-from sqlalchemy import Column, String, Integer, DateTime, ForeignKey, func
+from sqlalchemy import Column, String, Integer, DateTime, ForeignKey, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import relationship
 from app.database import Base
 
 class UserSession(Base):
     __tablename__ = "user_sessions"
+    __table_args__ = (
+        UniqueConstraint("session_id", name="uq_user_sessions_session_id"),
+    )
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)

@@ -4,7 +4,6 @@ LoadMatch Final Surgical Fix Trace
 """
 import asyncio, os, secrets, json
 from datetime import datetime
-from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from unittest.mock import AsyncMock, MagicMock, patch
 import sqlalchemy.dialects.sqlite.base as sqlite_base
@@ -17,7 +16,7 @@ mock_ai = MagicMock()
 mock_ai.messages.create = AsyncMock(return_value=good_ai)
 patch('anthropic.AsyncAnthropic', return_value=mock_ai).start()
 
-from app.database import Base
+from app.database import build_engine, create_schema
 from app.models.user import User, UserRole
 from app.models.user_activity import UserActivity
 from app.models.conversation import Conversation
@@ -70,8 +69,8 @@ from app.routers.webhook import receive_webhook
 from fastapi import Request
 from starlette.datastructures import Headers
 
-engine = create_engine("sqlite:///:memory:")
-Base.metadata.create_all(bind=engine)
+engine = build_engine("sqlite:///:memory:")
+create_schema(bind=engine)
 Sess = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 class FakeReq(Request):
@@ -90,8 +89,8 @@ def body(msg, phone="919999999999"):
     },"field":"messages"}]}]}
 
 async def run(label, msg, wa_client, db):
-    from app.services import whatsapp_service
-    whatsapp_service.response_sent_var.set(False)
+    from app.services.whatsapp_service import reset_response_guard
+    reset_response_guard()
     print(f"\n{'='*60}\n🧪 FINAL TEST: {label}\n{'='*60}")
     with patch('httpx.AsyncClient', return_value=wa_client):
         with patch('app.services.kyc_service.handle_kyc_image', AsyncMock(return_value=True)):

@@ -1,16 +1,16 @@
 import datetime
 from sqlalchemy.orm import Session
 
-from app.models.enums import UserRole, KycFlowState, LoadRequestStatus, TruckType, ListingStatus, MatchStatus, DocType
+from app.models.enums import UserRole, KycFlowState, LoadRequestStatus, TruckType, ListingStatus, DocType
 from app.models.user import User
 from app.models.load_request import LoadRequest
 from app.models.truck import Truck
 from app.models.listing import TruckSpaceListing
 from app.models.match import Match
 from app.models.kyc import KycDocument
+from app.services.logistics_data import normalize_hub_name
 from app.services.matching_service import find_matches_for_load, update_listing_capacity_after_match
 from app.services.storage_service import upload_whatsapp_media
-from app.services.location_service import normalize_city
 
 TOOLS = [
     {
@@ -125,8 +125,8 @@ async def execute_tool(name: str, args: dict, db: Session, user: User) -> dict:
         pickup_date = datetime.datetime.strptime(args["pickup_date"], "%Y-%m-%d").date()
         load = LoadRequest(
             shipper_id=user.id,
-            from_city=normalize_city(args["from_city"]),
-            to_city=normalize_city(args["to_city"]),
+            from_city=normalize_hub_name(args["from_city"]),
+            to_city=normalize_hub_name(args["to_city"]),
             pickup_date=pickup_date,
             weight_kg=args["weight_kg"],
             category=args.get("category"),
@@ -151,6 +151,8 @@ async def execute_tool(name: str, args: dict, db: Session, user: User) -> dict:
             await notify_on_load_created(db, load)
         except Exception as _svp_err:
             import logging as _log; _log.getLogger(__name__).warning("SVP error: %s", _svp_err)
+
+        db.commit()
         
         return {
             "status": "success", 
@@ -182,8 +184,8 @@ async def execute_tool(name: str, args: dict, db: Session, user: User) -> dict:
         listing = TruckSpaceListing(
             truck_id=truck.id,
             owner_id=user.id,
-            from_city=normalize_city(args["from_city"]),
-            to_city=normalize_city(args["to_city"]),
+            from_city=normalize_hub_name(args["from_city"]),
+            to_city=normalize_hub_name(args["to_city"]),
             departure_date=departure_date,
             allowed_categories=args.get("allowed_categories", []),
             total_capacity_kg=truck.total_capacity_kg,
@@ -235,6 +237,8 @@ async def execute_tool(name: str, args: dict, db: Session, user: User) -> dict:
                 msg += f"• {bl.from_city.title()} → {bl.to_city.title()} ({bl.weight_kg} kg)\n"
             await send_text(user.phone, msg)
             track_event(db, user.id, "BACKHAUL_MATCH_SUGGESTED", {"count": len(valid_backhauls)})
+
+        db.commit()
         
         return {
             "status": "success",
@@ -281,7 +285,7 @@ async def execute_tool(name: str, args: dict, db: Session, user: User) -> dict:
         if not load:
             return {"error": "Load request not found"}
             
-        matches = find_matches_for_load(db, load)
+        matches = find_matches_for_load(db, load, commit=False)
         load.status = LoadRequestStatus.matched
         db.commit()
         
@@ -306,9 +310,10 @@ async def execute_tool(name: str, args: dict, db: Session, user: User) -> dict:
             return {"error": "User unauthorized or not party to this match"}
             
         if match.shipper_confirmed and match.transporter_confirmed:
-            update_listing_capacity_after_match(db, str(match.id))
+            update_listing_capacity_after_match(db, str(match.id), commit=False)
             from app.services.event_logger import track_event
             track_event(db, user.id, "MATCH_CONFIRMED", {"match_id": str(match.id)})
+            db.commit()
             return {"status": "success", "message": "Match fully accepted and confirmed by both parties", "match_status": match.status.value}
             
         db.commit()
@@ -334,6 +339,7 @@ async def execute_tool(name: str, args: dict, db: Session, user: User) -> dict:
             
             from app.services.event_logger import track_event
             track_event(db, user.id, "KYC_UPLOADED", {"doc_type": args["doc_type"]})
+            db.commit()
             
             return {
                 "status": "success",

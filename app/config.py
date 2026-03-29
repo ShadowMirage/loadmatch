@@ -2,7 +2,10 @@ from typing import Optional
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
-    DATABASE_URL: str
+    DATABASE_URL: str = "sqlite:///./var/loadmatch_demo.db"
+    LOCAL_DATABASE_URL: str = "sqlite:///./var/loadmatch_demo.db"
+    AUTO_FALLBACK_TO_SQLITE: bool = True
+    REDIS_URL: str = "redis://redis:6379/0"
 
     # WhatsApp credentials
     WHATSAPP_TOKEN: Optional[str] = None
@@ -17,12 +20,13 @@ class Settings(BaseSettings):
 
     DEV_MODE: bool = False
 
-    ANTHROPIC_API_KEY: str
-    AWS_ACCESS_KEY: str
-    AWS_SECRET_KEY: str
-    AWS_REGION: str
-    S3_BUCKET: str
-    ADMIN_API_KEY: str
+    ANTHROPIC_API_KEY: Optional[str] = None
+    AWS_ACCESS_KEY: Optional[str] = None
+    AWS_SECRET_KEY: Optional[str] = None
+    AWS_REGION: str = "us-east-1"
+    S3_BUCKET: Optional[str] = None
+    LOCAL_MEDIA_DIR: str = "./var/media"
+    ADMIN_API_KEY: str = "dev-admin-key"
 
     AI_FIRST_MODE: bool = False
 
@@ -31,5 +35,14 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore"
     )
+
+    @staticmethod
+    def is_placeholder(value: Optional[str]) -> bool:
+        if value is None:
+            return True
+        normalized = str(value).strip().lower()
+        if not normalized:
+            return True
+        return normalized.startswith("your_") or normalized.endswith("_here")
 
 settings = Settings()

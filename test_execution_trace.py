@@ -2,7 +2,6 @@ import asyncio
 import os
 import secrets
 from datetime import datetime
-from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.types import TypeDecorator, String
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -22,7 +21,7 @@ mock_anthropic.messages = mock_messages
 patch('anthropic.AsyncAnthropic', return_value=mock_anthropic).start()
 
 # THEN import app modules
-from app.database import Base
+from app.database import build_engine, create_schema
 from app.models.user import User
 from app.models.user_activity import UserActivity
 from app.models.conversation import Conversation
@@ -59,8 +58,8 @@ from fastapi import Request
 from starlette.datastructures import Headers
 
 # ── SQLite in-memory DB ────────────────────────────────────────────────────
-engine = create_engine("sqlite:///:memory:")
-Base.metadata.create_all(bind=engine)
+engine = build_engine("sqlite:///:memory:")
+create_schema(bind=engine)
 TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
@@ -103,8 +102,8 @@ async def simulate_webhook(db_session, label, message_payload):
     print(f"🧪 TEST: {label}")
     print(f"{'='*60}")
     # Reset double-response guard per contextvars between tests
-    from app.services import whatsapp_service
-    whatsapp_service.response_sent_var.set(False)
+    from app.services.whatsapp_service import reset_response_guard
+    reset_response_guard()
 
     request = MockRequest(_make_body(message_payload))
     await receive_webhook(request=request, db=db_session)

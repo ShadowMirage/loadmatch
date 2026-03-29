@@ -8,6 +8,9 @@ from app.models.match import Match
 from app.models.user import User
 from app.services.cargo_rules import is_cargo_compatible
 from app.services.route_corridors import is_in_corridor, get_nearby_routes
+from app.services.logistics_data import (
+    CITY_LOGISTICS_HUBS, CorridorSource, get_corridor_source, normalize_hub_name
+)
 
 
 def _trust_badge(owner: User) -> str:
@@ -21,14 +24,37 @@ def _trust_badge(owner: User) -> str:
         parts.append(f"{owner.completed_trips} trips")
     return " | ".join(parts) if parts else "New"
 
+def corridor_bonus(origin: str, destination: str) -> int:
+    """Awards differentiated bonus points based on corridor source quality."""
+    if not origin or not destination:
+        return 0
+    
+    # Normalize for comparison
+    norm_origin = normalize_hub_name(origin)
+    norm_dest = normalize_hub_name(destination)
+    
+    if not norm_origin or not norm_dest:
+        return 0
+
+    source = get_corridor_source(origin, destination)
+    
+    bonus_map = {
+        CorridorSource.CITY_PAIR: 10,
+        CorridorSource.INDUSTRIAL_ZONE_PAIR: 12,
+        CorridorSource.ALIAS_PAIR: 8,
+        CorridorSource.ADJACENT_CITY_PAIR: 9,
+    }
+    
+    return bonus_map.get(source, 0)
+
 def score_match(load: LoadRequest, listing: TruckSpaceListing, owner: User) -> int:
     score = 0
     
     # 1. Route Score (Max 40)
-    req_pickup = load.from_city.lower() if load.from_city else ""
-    req_drop = load.to_city.lower() if load.to_city else ""
-    list_pickup = listing.from_city.lower() if listing.from_city else ""
-    list_drop = listing.to_city.lower() if listing.to_city else ""
+    req_pickup = normalize_hub_name(load.from_city) if load.from_city else ""
+    req_drop = normalize_hub_name(load.to_city) if load.to_city else ""
+    list_pickup = normalize_hub_name(listing.from_city) if listing.from_city else ""
+    list_drop = normalize_hub_name(listing.to_city) if listing.to_city else ""
     
     if req_pickup == list_pickup and req_drop == list_drop:
         score += 40
@@ -36,6 +62,9 @@ def score_match(load: LoadRequest, listing: TruckSpaceListing, owner: User) -> i
         score += 30
     elif req_pickup == list_pickup or req_drop == list_drop:
         score += 20
+    
+    # Industrial Corridor Bonus (Reusing logistics_data)
+    score += corridor_bonus(req_pickup, req_drop)
         
     # 2. Date Score (Max 20)
     if load.pickup_date and listing.departure_date:
@@ -94,12 +123,27 @@ def rank_matches(load: LoadRequest, trucks: list, db: Session) -> list[dict]:
             )
             db.add(match)
             
-        db.flush()
-        
+        # We collect the match object to get the ID after flush
         match_results.append({
-            "match_id":             str(match.id),
+            "match_obj":            match,
             "score":                float(score),
-            "match_score_pct":      int(score),              
+            "owner":                owner,
+            "listing":              listing
+        })
+    
+    # Consolidate disk syncs
+    db.flush()
+
+    final_results = []
+    for m in match_results:
+        match = m["match_obj"]
+        owner = m["owner"]
+        listing = m["listing"]
+        
+        final_results.append({
+            "match_id":             str(match.id),
+            "score":                m["score"],
+            "match_score_pct":      int(m["score"]),              
             "trust_badge":          _trust_badge(owner),
             "from_city":            listing.from_city,
             "to_city":              listing.to_city,
@@ -112,8 +156,9 @@ def rank_matches(load: LoadRequest, trucks: list, db: Session) -> list[dict]:
             "completed_trips":      owner.completed_trips,
         })
         
-    match_results.sort(key=lambda x: x["score"], reverse=True)
-    return match_results[:5]
+    # 🔥 Deterministic tie-breaker: sort by score DESC, then match_id ASC
+    final_results.sort(key=lambda x: (-x["score"], x["match_id"]))
+    return final_results[:5]
 
 def suggest_nearby_matches(load: LoadRequest) -> list[dict]:
     """Smart suggestions when no exact match is found."""
@@ -123,7 +168,7 @@ def suggest_nearby_matches(load: LoadRequest) -> list[dict]:
     return []
 
 
-def find_matches_for_load(db: Session, load: LoadRequest) -> list[dict]:
+def find_matches_for_load(db: Session, load: LoadRequest, commit: bool = False) -> list[dict]:
     now = datetime.now(timezone.utc)
     start_date = load.pickup_date - timedelta(days=2)
     end_date   = load.pickup_date + timedelta(days=2)
@@ -152,11 +197,12 @@ def find_matches_for_load(db: Session, load: LoadRequest) -> list[dict]:
     if not match_results:
         match_results = suggest_nearby_matches(load)
 
-    db.commit()
+    if commit:
+        db.commit()
     return match_results
 
 
-def update_listing_capacity_after_match(db: Session, match_id: str):
+def update_listing_capacity_after_match(db: Session, match_id: str, commit: bool = False):
     match   = db.query(Match).filter(Match.id == match_id).first()
     if not match:
         raise ValueError("Match not found")
@@ -173,7 +219,10 @@ def update_listing_capacity_after_match(db: Session, match_id: str):
     listing.status = ListingStatus.full if listing.available_capacity_kg <= 0 else ListingStatus.partial
     load.status    = LoadRequestStatus.confirmed
     match.status   = MatchStatus.accepted
-    db.commit()
+    if commit:
+        db.commit()
+    else:
+        db.flush()
 
 
 # ---------------------------------------------------------------------------
@@ -210,21 +259,19 @@ def find_matches_for_truck_summary(db: Session, listing: TruckSpaceListing) -> d
         if not is_cargo_compatible(load.category, listing.allowed_categories):
             continue
 
-        # Simple score for live feedback
-        score = 80 # Base for corridor match
-        days_diff = abs((listing.departure_date - load.pickup_date).days)
-        score += (20 - (days_diff * 10))
-        score = min(score, 100)
+        # 🔥 AUTHORITATIVE SCORING (Unified)
+        score = score_match(load, listing, shipper)
 
         matches.append({
             "cargo":       load.category.value if hasattr(load.category, 'value') else str(load.category),
             "weight":      load.weight_kg,
             "pickup":      load.from_city,
             "drop":        load.to_city,
-            "match_score": int(score)
+            "match_score": int(score),
+            "load_id":     str(load.id)
         })
 
-    matches.sort(key=lambda x: x["match_score"], reverse=True)
+    matches.sort(key=lambda x: (-x["match_score"], x["load_id"]))
     top_matches = matches[:3]
 
     return {
@@ -233,12 +280,12 @@ def find_matches_for_truck_summary(db: Session, listing: TruckSpaceListing) -> d
     }
 
 
-def find_matches_for_load_summary(db: Session, load: LoadRequest) -> dict:
+def find_matches_for_load_summary(db: Session, load: LoadRequest, commit: bool = False) -> dict:
     """
     Find up to 3 matching trucks for a load request.
     Returns a summarized dictionary for UI display.
     """
-    results = find_matches_for_load(db, load)
+    results = find_matches_for_load(db, load, commit=commit)
     
     # Check for fallback suggestions structure
     if results and "fallback_suggestions" in results[0]:

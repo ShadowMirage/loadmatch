@@ -1,8 +1,6 @@
 import logging
-import time
 from typing import Any
 from sqlalchemy.orm import Session
-from datetime import datetime
 
 logger = logging.getLogger("loadmatch.debug")
 
@@ -74,4 +72,3 @@ class DebugLogger:
 
         if latency > 2.0:
             logger.error(f"SLOW_RESPONSE: Latency {latency}s > 2s")
-

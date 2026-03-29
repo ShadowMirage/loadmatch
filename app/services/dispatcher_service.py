@@ -1,0 +1,599 @@
+import dataclasses
+import logging
+import re
+from typing import Any, Optional
+from datetime import date
+
+import dateparser
+from sqlalchemy.orm import Session
+
+from app.contracts.payloads import CreateLoadPayload, PostTruckPayload
+from app.contracts.responses import Response as ContractResponse, Button, Section, SectionRow
+from app.contracts.enums import Intent
+from app.contracts.meta_intents import INTERRUPT_INTENTS
+from app.models.load_request import LoadRequest
+from app.models.listing import TruckSpaceListing
+from app.models.match import Match
+from app.models.rating import Rating
+from app.models.truck import Truck
+from app.models.user import User
+from app.models.enums import LoadRequestStatus, ListingStatus, TruckType
+from app.services.logistics_data import normalize_hub_name
+from app.services.matching_service import find_matches_for_load_summary, find_matches_for_truck_summary
+from app.services.session_manager import clear_session, get_session_data
+
+logger = logging.getLogger(__name__)
+
+class DispatcherService:
+    """
+    'Dumb' executor. NO validation. NO branching.
+    Executes Intent using Payload. Returns standardized Response.
+    """
+    def __init__(self, db: Session, user_id: str, phone: str = None):
+        self.db = db
+        self.user_id = user_id
+        self.phone = phone
+
+    def execute(self, intent: Intent, payload: Any, current_workflow: Optional[str] = None) -> ContractResponse:
+        """
+        'Dumb' executor. NO validation. NO branching.
+        Executes Intent using Payload. Returns standardized ContractResponse.
+        """
+        # 1. Handle CONFIRMATION of flows (Actually hits DB)
+        if intent == Intent.CONFIRM:
+            if current_workflow == "LOAD_FLOW":
+                return self._handle_confirm_load(payload)
+            elif current_workflow == "TRUCK_FLOW":
+                return self._handle_confirm_truck(payload)
+            else:
+                return ContractResponse(text="Nothing to confirm.")
+
+        if intent == Intent.CANCEL:
+            return self._main_menu_response("Okay, I cancelled that request.")
+
+        # 2. Handle Collection / Initialization flows (Does NOT hit DB, just prompts)
+        if intent == Intent.CREATE_LOAD:
+            return self._handle_create_load_prompt(payload)
+        if intent == Intent.POST_TRUCK:
+            return self._handle_post_truck_prompt(payload)
+        if intent == Intent.VIEW_LOADS:
+            return self._handle_view_loads()
+        if intent == Intent.VIEW_TRUCKS:
+            return self._handle_view_trucks()
+        if intent == Intent.UPLOAD_KYC:
+            return self._handle_upload_kyc()
+        if intent == Intent.RATE_TRIP:
+            return self._handle_rate_trip(payload)
+        if intent == Intent.TRACK_TRUCK:
+            return self._handle_track_truck(payload)
+        if intent == Intent.CONTACT_DRIVER:
+            return self._handle_contact_driver(payload)
+        if intent == Intent.CONFIRM_BOOKING:
+            return self._handle_confirm_booking(payload)
+        if intent == Intent.UNKNOWN and current_workflow in (None, "IDLE"):
+            return self._main_menu_response("Please select an option:")
+
+        if intent in INTERRUPT_INTENTS:
+            return self._handle_menu_interrupt(current_workflow)
+
+        return self._handle_menu_interrupt(current_workflow)
+
+    def _handle_create_load_prompt(self, payload: CreateLoadPayload) -> ContractResponse:
+        """Guide the user through missing slots, then confirm collected data."""
+        data = self._collect_payload_data(payload)
+        missing_field = self._missing_load_field(data)
+        if missing_field:
+            return self._ask_for_missing_field("load", missing_field)
+
+        from_city = self._city_label(data.get("from_city"))
+        to_city = self._city_label(data.get("to_city"))
+        weight = int(data.get("weight_kg") or 0)
+        pickup_date = self._coerce_date(data.get("pickup_date") or data.get("date"))
+
+        text = (
+            f"Confirming your load details:\n"
+            f"📍 From: {from_city}\n"
+            f"🏁 To: {to_city}\n"
+            f"⚖️ Weight: {weight} kg\n\n"
+            f"📅 Pickup: {self._format_date(pickup_date)}\n\n"
+            f"Is this correct?"
+        )
+        
+        buttons = [
+            Button(id="CONFIRM_LOAD", title="Confirm"),
+            Button(id="CANCEL", title="Cancel"),
+        ]
+        
+        return ContractResponse(text=text, buttons=buttons)
+
+    def _handle_post_truck_prompt(self, payload: PostTruckPayload) -> ContractResponse:
+        """Guide the user through missing slots, then confirm collected data."""
+        data = self._collect_payload_data(payload)
+        missing_field = self._missing_truck_field(data)
+        if missing_field:
+            return self._ask_for_missing_field("truck", missing_field)
+
+        from_city = self._city_label(data.get("current_city") or data.get("from_city"))
+        to_city = self._city_label(data.get("to_city"))
+        capacity = int(data.get("capacity_kg") or 0)
+        departure_date = self._coerce_date(data.get("departure_date") or data.get("date"))
+
+        text = (
+            f"Confirming your truck availability:\n"
+            f"📍 From: {from_city}\n"
+            f"🏁 To: {to_city}\n"
+            f"⚖️ Capacity: {capacity} kg\n\n"
+            f"📅 Departure: {self._format_date(departure_date)}\n\n"
+            f"Is this correct?"
+        )
+        
+        buttons = [
+            Button(id="CONFIRM_TRUCK", title="Confirm"),
+            Button(id="CANCEL", title="Cancel"),
+        ]
+        
+        return ContractResponse(text=text, buttons=buttons)
+
+    def _handle_confirm_load(self, payload: Any) -> ContractResponse:
+        """Actually create the LoadRequest in DB."""
+        try:
+            data = self._collect_payload_data(payload)
+            missing_field = self._missing_load_field(data)
+            if missing_field:
+                return self._ask_for_missing_field("load", missing_field)
+
+            load = LoadRequest(
+                shipper_id=self.user_id,
+                from_city=self._city_label(data.get("from_city")),
+                to_city=self._city_label(data.get("to_city")),
+                weight_kg=int(data.get("weight_kg") or 0),
+                budget_per_kg=self._coerce_float(data.get("budget_per_kg")),
+                goods_type=data.get("cargo") or data.get("material_type") or "General",
+                pickup_date=self._coerce_date(data.get("pickup_date") or data.get("date")),
+                status=LoadRequestStatus.open,
+            )
+            self.db.add(load)
+            self.db.flush()
+
+            matching_summary = self._safe_load_matching_summary(load)
+            if matching_summary.get("match_count", 0) > 0:
+                load.status = LoadRequestStatus.matched
+            
+            if self.phone:
+                clear_session(self.db, self.phone)
+
+            logger.info(f"Created LoadRequest {load.id} for user {self.user_id}")
+            return ContractResponse(
+                text=(
+                    f"Load Created\n"
+                    f"{load.from_city} → {load.to_city}\n"
+                    f"{load.weight_kg} kg on {self._format_date(load.pickup_date)}"
+                    f"{self._format_load_match_summary(matching_summary)}"
+                )
+            )
+        except Exception as e:
+            logger.error(f"Failed to confirm load: {e}")
+            return ContractResponse(text="❌ Failed to post load. Please try again.")
+
+    def _handle_confirm_truck(self, payload: Any) -> ContractResponse:
+        """Actually create the Listing in DB."""
+        try:
+            data = self._collect_payload_data(payload)
+            missing_field = self._missing_truck_field(data)
+            if missing_field:
+                return self._ask_for_missing_field("truck", missing_field)
+
+            capacity_kg = int(data.get("capacity_kg") or 0)
+            registration_number = (data.get("plate") or f"TRK{str(self.user_id).replace('-', '')[:8]}").upper()
+            truck_type = self._coerce_truck_type(data.get("truck_type"))
+
+            truck = self.db.query(Truck).filter(Truck.owner_id == self.user_id).first()
+            if not truck:
+                truck = Truck(
+                    owner_id=self.user_id,
+                    truck_type=truck_type,
+                    total_capacity_kg=capacity_kg or 10000,
+                    registration_number=registration_number,
+                )
+                self.db.add(truck)
+                self.db.flush()
+            else:
+                truck.truck_type = truck_type
+                truck.total_capacity_kg = capacity_kg or truck.total_capacity_kg
+                truck.registration_number = registration_number
+
+            listing = TruckSpaceListing(
+                owner_id=self.user_id,
+                truck_id=truck.id,
+                from_city=self._city_label(data.get("current_city") or data.get("from_city")),
+                to_city=self._city_label(data.get("to_city")),
+                departure_date=self._coerce_date(data.get("departure_date") or data.get("date")),
+                total_capacity_kg=capacity_kg,
+                available_capacity_kg=capacity_kg,
+                price_per_kg=self._coerce_float(data.get("rate_per_kg"), default=0.0) or 0.0,
+                status=ListingStatus.open,
+            )
+            self.db.add(listing)
+            self.db.flush()
+
+            matching_summary = self._safe_truck_matching_summary(listing)
+
+            if self.phone:
+                clear_session(self.db, self.phone)
+
+            logger.info(f"Created TruckSpaceListing {listing.id} for user {self.user_id}")
+            return ContractResponse(
+                text=(
+                    f"Truck Posted\n"
+                    f"{listing.from_city} → {listing.to_city}\n"
+                    f"{listing.available_capacity_kg} kg on {self._format_date(listing.departure_date)}"
+                    f"{self._format_truck_match_summary(matching_summary)}"
+                )
+            )
+        except Exception as e:
+            logger.error(f"Failed to confirm truck: {e}")
+            return ContractResponse(text="❌ Failed to post truck. Please try again.")
+
+    def _handle_view_loads(self) -> ContractResponse:
+        """List active loads for the user."""
+        loads = self.db.query(LoadRequest)\
+            .filter(LoadRequest.shipper_id == self.user_id)\
+            .order_by(LoadRequest.created_at.desc())\
+            .limit(5).all()
+
+        if not loads:
+            return ContractResponse(text="You have no active loads.")
+
+        rows = [
+            SectionRow(
+                id=str(load.id),
+                title=f"{load.from_city} → {load.to_city}",
+                description=f"{load.weight_kg} kg | {self._format_date(load.pickup_date)}",
+            )
+            for load in loads
+        ]
+        return ContractResponse(
+            text="Your recent loads",
+            sections=[Section(title="Loads", rows=rows)],
+            list_button_text="View Loads",
+        )
+
+    def _handle_view_trucks(self) -> ContractResponse:
+        """List active truck listings for the user."""
+        listings = self.db.query(TruckSpaceListing)\
+            .filter(TruckSpaceListing.owner_id == self.user_id)\
+            .order_by(TruckSpaceListing.created_at.desc())\
+            .limit(5).all()
+
+        if not listings:
+            return ContractResponse(text="You have no active truck listings.")
+
+        rows = [
+            SectionRow(
+                id=str(listing.id),
+                title=f"{listing.from_city} → {listing.to_city}",
+                description=f"{listing.available_capacity_kg} kg | {self._format_date(listing.departure_date)}",
+            )
+            for listing in listings
+        ]
+        return ContractResponse(
+            text="Your recent truck listings",
+            sections=[Section(title="Truck Listings", rows=rows)],
+            list_button_text="View Trucks",
+        )
+
+    def _main_menu_response(self, prefix: str = "") -> ContractResponse:
+        text_parts = [prefix] if prefix else []
+        text_parts.append("Welcome to LoadMatch. How can I help you today?")
+        buttons = [
+            Button(id="POST_LOAD", title="Post Load"),
+            Button(id="POST_TRUCK", title="Post Truck"),
+            Button(id="UPLOAD_KYC", title="Upload KYC"),
+        ]
+        return ContractResponse(text="\n".join(text_parts), buttons=buttons)
+
+    def _handle_upload_kyc(self) -> ContractResponse:
+        return ContractResponse(
+            text="KYC Upload\nPlease upload a photo of your RC or Driving License to complete KYC.",
+            buttons=[Button(id="MAIN_MENU", title="Main Menu")],
+        )
+
+    def _handle_rate_trip(self, payload: Any) -> ContractResponse:
+        action_id = self._extract_action_id(payload)
+        match_id, score = self._match_and_score_from_action(action_id)
+        if not match_id or score is None:
+            return ContractResponse(text="Unable to record that rating.")
+
+        match_obj = self.db.query(Match).filter(Match.id == match_id).first()
+        if not match_obj:
+            return ContractResponse(text="Unable to find that trip for rating.")
+
+        load = self.db.query(LoadRequest).filter(LoadRequest.id == match_obj.load_request_id).first()
+        listing = self.db.query(TruckSpaceListing).filter(TruckSpaceListing.id == match_obj.listing_id).first()
+        if not load or not listing:
+            return ContractResponse(text="Unable to find that trip for rating.")
+
+        if str(load.shipper_id) == str(self.user_id):
+            rated_user_id = listing.owner_id
+        elif str(listing.owner_id) == str(self.user_id):
+            rated_user_id = load.shipper_id
+        else:
+            return ContractResponse(text="You are not part of that trip.")
+
+        existing = self.db.query(Rating).filter(
+            Rating.match_id == match_obj.id,
+            Rating.rater_id == self.user_id,
+        ).first()
+        if existing:
+            existing.score = float(score)
+        else:
+            self.db.add(
+                Rating(
+                    match_id=match_obj.id,
+                    rater_id=self.user_id,
+                    rated_user_id=rated_user_id,
+                    score=float(score),
+                )
+            )
+
+        if self.phone:
+            clear_session(self.db, self.phone)
+
+        return ContractResponse(text=f"Thanks. Your {score}/5 rating has been saved.")
+
+    def _handle_track_truck(self, payload: Any) -> ContractResponse:
+        booking_code = self._booking_code_from_action(payload, "TRACK_TRUCK_")
+        match_obj = self._match_by_booking_code(booking_code)
+        if not match_obj:
+            return ContractResponse(text="Booking not found.")
+
+        listing = self.db.query(TruckSpaceListing).filter(TruckSpaceListing.id == match_obj.listing_id).first()
+        if not listing:
+            return ContractResponse(text="Truck details are unavailable for that booking.")
+
+        eta_text = self._format_eta(match_obj.eta)
+        location_text = self._format_driver_location(match_obj.driver_lat, match_obj.driver_lng)
+        return ContractResponse(
+            text=(
+                f"Booking {booking_code}\n"
+                f"Route: {listing.from_city} → {listing.to_city}\n"
+                f"Status: {match_obj.status.value}\n"
+                f"{eta_text}{location_text}"
+            )
+        )
+
+    def _handle_contact_driver(self, payload: Any) -> ContractResponse:
+        booking_code = self._booking_code_from_action(payload, "CONTACT_DRIVER_")
+        match_obj = self._match_by_booking_code(booking_code)
+        if not match_obj:
+            return ContractResponse(text="Booking not found.")
+
+        listing = self.db.query(TruckSpaceListing).filter(TruckSpaceListing.id == match_obj.listing_id).first()
+        if not listing:
+            return ContractResponse(text="Driver contact is unavailable for that booking.")
+
+        truck_owner_phone = None
+        if getattr(listing, "owner", None) is not None:
+            truck_owner_phone = getattr(listing.owner, "phone", None)
+        if truck_owner_phone is None:
+            owner = self.db.query(User).filter(User.id == listing.owner_id).first()
+            truck_owner_phone = getattr(owner, "phone", None)
+
+        if not truck_owner_phone:
+            return ContractResponse(text="Driver contact is unavailable for that booking.")
+
+        return ContractResponse(
+            text=f"Booking {booking_code}\nDriver contact: {truck_owner_phone}"
+        )
+
+    def _handle_confirm_booking(self, payload: Any) -> ContractResponse:
+        booking_code = self._booking_code_from_action(payload, "CONFIRM_BOOKING_")
+        match_obj = self._match_by_booking_code(booking_code)
+        if not match_obj:
+            return ContractResponse(text="Booking not found.")
+
+        return ContractResponse(
+            text=(
+                f"Booking {booking_code}\n"
+                f"Current status: {match_obj.status.value}\n"
+                f"Use Track Truck or Contact Driver for the next step."
+            )
+        )
+
+    def _format_date(self, d: Optional[date]) -> str:
+        if not d: return "Today"
+        return d.strftime("%d-%m-%Y")
+
+    def _coerce_date(self, val: Any) -> date:
+        if isinstance(val, date): return val
+        if not val: return date.today()
+        try:
+            return dateparser.parse(str(val)).date()
+        except Exception:
+            return date.today()
+
+    @staticmethod
+    def _reference_code(prefix: str, entity_id: Any) -> str:
+        return f"{prefix}{str(entity_id).replace('-', '').upper()[:8]}"
+
+    @staticmethod
+    def _coerce_float(value: Any, default: Optional[float] = None) -> Optional[float]:
+        if value in (None, ""):
+            return default
+        return float(value)
+
+    def _collect_payload_data(self, payload: Any) -> dict:
+        payload_data = {}
+        if payload is None:
+            payload_data = {}
+        elif isinstance(payload, dict):
+            payload_data = payload.get("data", payload)
+        elif hasattr(payload, "data") and isinstance(payload.data, dict):
+            payload_data = payload.data
+        elif dataclasses.is_dataclass(payload):
+            payload_data = dataclasses.asdict(payload)
+        else:
+            payload_data = {
+                key: value
+                for key, value in getattr(payload, "__dict__", {}).items()
+                if not key.startswith("_")
+            }
+
+        session_data = {}
+        if self.phone:
+            try:
+                session_data = get_session_data(self.db, self.phone, str(self.user_id), create=False) or {}
+            except Exception:
+                session_data = {}
+
+        return {**session_data, **(payload_data or {})}
+
+    @staticmethod
+    def _city_label(value: Any) -> str:
+        normalized = normalize_hub_name(str(value or ""))
+        return normalized.title() if normalized else "Unknown"
+
+    @staticmethod
+    def _missing_load_field(data: dict) -> Optional[str]:
+        ordered_fields = ("from_city", "to_city", "weight_kg", "date")
+        aliases = {"date": ("pickup_date", "date")}
+        for field in ordered_fields:
+            candidates = aliases.get(field, (field,))
+            if not any(data.get(candidate) not in (None, "") for candidate in candidates):
+                return field
+        return None
+
+    @staticmethod
+    def _missing_truck_field(data: dict) -> Optional[str]:
+        ordered_fields = ("from_city", "to_city", "capacity_kg", "date")
+        aliases = {
+            "from_city": ("current_city", "from_city"),
+            "date": ("departure_date", "date"),
+        }
+        for field in ordered_fields:
+            candidates = aliases.get(field, (field,))
+            if not any(data.get(candidate) not in (None, "") for candidate in candidates):
+                return field
+        return None
+
+    @staticmethod
+    def _ask_for_missing_field(flow: str, field_name: str) -> ContractResponse:
+        prompts = {
+            "from_city": "Please share the pickup city, or tell me where the load starts from.",
+            "to_city": "Please share the destination city.",
+            "weight_kg": "Please share the load weight.",
+            "capacity_kg": "Please share the truck capacity.",
+            "date": "Please share the pickup date.",
+        }
+        if flow == "truck" and field_name == "date":
+            prompts["date"] = "Please share the departure date."
+        return ContractResponse(text=prompts.get(field_name, "Please share the missing details."))
+
+    @staticmethod
+    def _coerce_truck_type(value: Any) -> TruckType:
+        normalized = str(value or "").strip().lower().replace(" ", "_")
+        for truck_type in TruckType:
+            if truck_type.value == normalized:
+                return truck_type
+        return TruckType.medium
+
+    def _extract_action_id(self, payload: Any) -> str:
+        data = self._collect_payload_data(payload)
+        return str(data.get("interactive_action_id") or "").strip()
+
+    def _booking_code_from_action(self, payload: Any, prefix: str) -> Optional[str]:
+        action_id = self._extract_action_id(payload)
+        if not action_id.startswith(prefix):
+            return None
+        return action_id[len(prefix):] or None
+
+    def _match_by_booking_code(self, booking_code: Optional[str]) -> Optional[Match]:
+        if not booking_code:
+            return None
+        return self.db.query(Match).filter(Match.booking_code == booking_code).first()
+
+    @staticmethod
+    def _match_and_score_from_action(action_id: str) -> tuple[Optional[str], Optional[int]]:
+        rating_match = re.fullmatch(r"RATING_(.+)_(\d)", action_id or "")
+        if not rating_match:
+            return None, None
+        return rating_match.group(1), int(rating_match.group(2))
+
+    @staticmethod
+    def _format_eta(eta: Optional[date]) -> str:
+        if not eta:
+            return "ETA: pending\n"
+        return f"ETA: {eta}\n"
+
+    @staticmethod
+    def _format_driver_location(lat: Optional[float], lng: Optional[float]) -> str:
+        if lat is None or lng is None:
+            return "Live location: unavailable"
+        return f"Live location: {lat}, {lng}"
+
+    def _safe_load_matching_summary(self, load: LoadRequest) -> dict:
+        try:
+            return find_matches_for_load_summary(self.db, load, commit=False)
+        except Exception as exc:
+            logger.warning(f"Load matching skipped for {load.id}: {exc}")
+            return {"match_count": 0, "matches": []}
+
+    def _safe_truck_matching_summary(self, listing: TruckSpaceListing) -> dict:
+        try:
+            return find_matches_for_truck_summary(self.db, listing)
+        except Exception as exc:
+            logger.warning(f"Truck matching skipped for {listing.id}: {exc}")
+            return {"match_count": 0, "matches": []}
+
+    @staticmethod
+    def _format_load_match_summary(summary: dict) -> str:
+        if summary.get("match_count", 0) <= 0:
+            fallback_routes = summary.get("fallback_suggestions") or []
+            if fallback_routes:
+                suggestions = ", ".join(f"{origin} → {destination}" for origin, destination in fallback_routes[:3])
+                return f"\n\nNo exact truck matches yet. Nearby lanes: {suggestions}"
+            return "\n\nNo truck matches yet."
+
+        lines = [f"\n\nFound {summary['match_count']} matching truck(s):"]
+        for index, match in enumerate(summary.get("matches", [])[:3], start=1):
+            lines.append(
+                f"{index}. {match['pickup']} → {match['drop']} | "
+                f"{match['weight']} kg | {match['match_score']}% match"
+            )
+        return "\n".join(lines)
+
+    @staticmethod
+    def _format_truck_match_summary(summary: dict) -> str:
+        if summary.get("match_count", 0) <= 0:
+            return "\n\nNo matching loads yet."
+
+        lines = [f"\n\nFound {summary['match_count']} matching load(s):"]
+        for index, match in enumerate(summary.get("matches", [])[:3], start=1):
+            lines.append(
+                f"{index}. {match['pickup']} → {match['drop']} | "
+                f"{match['weight']} kg | {match['match_score']}% match"
+            )
+        return "\n".join(lines)
+
+    def _is_confirmation_step(self, workflow: Optional[str]) -> bool:
+        if not workflow:
+            return False
+        return workflow.endswith("_CONFIRM")
+
+    def _handle_menu_interrupt(self, workflow: Optional[str]) -> ContractResponse:
+        if workflow and workflow != "IDLE" and not self._is_confirmation_step(workflow):
+            return ContractResponse(
+                text=(
+                    "You're currently in a workflow.\n\n"
+                    "1️⃣ Continue\n"
+                    "2️⃣ Cancel\n"
+                    "3️⃣ Main Menu"
+                )
+            )
+        
+        if workflow and self._is_confirmation_step(workflow):
+            return ContractResponse(
+                text="You are confirming an action.\n\nReply:\n1️⃣ Continue\n2️⃣ Cancel"
+            )
+
+        return self._main_menu_response()

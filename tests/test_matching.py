@@ -1,99 +1,82 @@
-import datetime
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
+from datetime import date, timedelta
+from types import SimpleNamespace
 
-from app.database import Base
-from app.models.user import User
-from app.models.enums import UserRole, KycFlowState
-from app.models.truck import Truck, TruckType
-from app.models.listing import TruckSpaceListing, ListingStatus
-from app.models.load_request import LoadRequest, LoadRequestStatus
-from app.services.matching_service import find_matches_for_load
+from app.models.enums import KycFlowState
+from app.services.matching_service import score_match
+from app.services.route_corridors import get_corridor, get_nearby_routes, is_in_corridor
 
-def run_test():
-    # Setup in-memory SQLite database
-    print("Setting up in-memory database...")
-    engine = create_engine("sqlite:///:memory:", echo=False)
-    Base.metadata.create_all(bind=engine)
-    Session = sessionmaker(bind=engine)
-    db = Session()
-    
-    # 1. Create a transporter user
-    transporter = User(
-        phone="919876543210", 
-        name="Rahul Transporter", 
-        role=UserRole.transporter,
-        kyc_flow_state=KycFlowState.verified
-    )
-    db.add(transporter)
-    db.flush()
-    
-    # 2. Add their truck
-    truck = Truck(
-        owner_id=transporter.id,
-        registration_number="MH12AB3456",
-        truck_type=TruckType.medium,
-        total_capacity_kg=1000
-    )
-    db.add(truck)
-    db.flush()
-    
-    # 3. Create a listing (Delhi -> Mumbai, 500kg, ₹5/kg, today)
-    today = datetime.date.today()
-    listing = TruckSpaceListing(
-        truck_id=truck.id,
-        owner_id=transporter.id,
-        from_city="Delhi",
-        to_city="Mumbai",
-        departure_date=today,
-        total_capacity_kg=1000,
-        available_capacity_kg=500,
-        price_per_kg=5.00,
-        status=ListingStatus.open
-    )
-    db.add(listing)
-    
-    # 4. Create a shipper user
-    shipper = User(
-        phone="919988776655",
-        name="Amit Shipper",
-        role=UserRole.shipper,
-        kyc_flow_state=KycFlowState.not_started
-    )
-    db.add(shipper)
-    db.flush()
-    
-    # 5. Create a load request (Delhi -> Mumbai, 200kg, today, up to ₹10/kg budget)
-    load = LoadRequest(
-        shipper_id=shipper.id,
-        from_city="Delhi",
-        to_city="Mumbai",
-        pickup_date=today,
-        weight_kg=200,
-        budget_per_kg=10.00,
-        status=LoadRequestStatus.open
-    )
-    db.add(load)
-    db.commit()
-    
-    print("\n--- Testing Matchmaking Logic ---")
-    print(f"Load: {load.weight_kg}kg | {load.from_city} -> {load.to_city} | {load.pickup_date} | Budget: {load.budget_per_kg}")
-    print(f"Listing: {listing.available_capacity_kg}kg | {listing.from_city} -> {listing.to_city} | {listing.departure_date} | Price: {listing.price_per_kg}")
-    
-    # 6. Call matching service
-    matches = find_matches_for_load(db, load)
-    
-    # Assertions
-    assert len(matches) > 0, "No matches were found!"
-    top_match = matches[0]
-    assert top_match["score"] > 0, "Match score should be > 0"
-    
-    print("\n✅ MATCH FOUND RESULT:")
-    for key, value in top_match.items():
-         print(f"   {key}: {value}")
-         
-    print("\n✅ Test passed successfully!")
-    db.close()
 
-if __name__ == "__main__":
-    run_test()
+def _owner(rating: float, verified: bool = True, completed_trips: int = 0):
+    return SimpleNamespace(
+        rating=rating,
+        kyc_flow_state=KycFlowState.verified if verified else KycFlowState.not_started,
+        completed_trips=completed_trips,
+    )
+
+
+def _load(from_city: str, to_city: str, pickup_date: date, weight_kg: int):
+    return SimpleNamespace(
+        from_city=from_city,
+        to_city=to_city,
+        pickup_date=pickup_date,
+        weight_kg=weight_kg,
+    )
+
+
+def _listing(from_city: str, to_city: str, departure_date: date, capacity_kg: int):
+    return SimpleNamespace(
+        from_city=from_city,
+        to_city=to_city,
+        departure_date=departure_date,
+        available_capacity_kg=capacity_kg,
+    )
+
+
+def test_score_match_rewards_exact_route_date_capacity_and_reputation():
+    today = date.today()
+    owner = _owner(rating=4.9, completed_trips=12)
+    load = _load("Delhi", "Mumbai", today, 200)
+    listing = _listing("Delhi", "Mumbai", today, 200)
+
+    assert score_match(load, listing, owner) == 100
+
+
+def test_score_match_drops_when_route_date_and_capacity_are_worse():
+    today = date.today()
+    strong_owner = _owner(rating=4.9, completed_trips=12)
+    weaker_owner = _owner(rating=3.6, verified=False, completed_trips=0)
+
+    ideal = score_match(
+        _load("Delhi", "Mumbai", today, 200),
+        _listing("Delhi", "Mumbai", today, 200),
+        strong_owner,
+    )
+    weaker = score_match(
+        _load("Delhi", "Mumbai", today, 200),
+        _listing("Pune", "Mumbai", today + timedelta(days=2), 600),
+        weaker_owner,
+    )
+
+    assert weaker < ideal
+
+
+def test_score_match_normalizes_city_aliases_before_scoring():
+    today = date.today()
+    owner = _owner(rating=4.9, completed_trips=12)
+    load = _load("New Delhi", "Mumbai", today, 200)
+    listing = _listing("Delhi", "Bombay", today, 200)
+
+    assert score_match(load, listing, owner) == 100
+
+
+def test_corridor_lookup_and_membership_use_canonical_city_forms():
+    corridor = get_corridor("Jaipur", "NEW DELHI")
+
+    assert corridor is not None
+    assert corridor[0] == "jaipur"
+    assert corridor[-1] == "delhi"
+    assert is_in_corridor("Jaipur", "Gurgaon", "Jaipur", "New Delhi") is True
+
+
+def test_nearby_routes_return_display_ready_route_labels():
+    assert ("Jaipur", "Delhi") in get_nearby_routes("Bhiwadi", "Delhi")

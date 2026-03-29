@@ -9,18 +9,18 @@ Includes a notification cooldown: max 5 notifications per user per hour per rout
 import logging
 from datetime import datetime, timezone, timedelta
 from sqlalchemy.orm import Session
-from sqlalchemy import func
 
 from app.models.user import User
 from app.models.load_request import LoadRequest
 from app.models.listing import TruckSpaceListing
 from app.models.route_subscription import RouteSubscription
 from app.models.event import EventLog
-from app.models.enums import ListingStatus, LoadRequestStatus, KycFlowState
+from app.models.enums import ListingStatus, LoadRequestStatus
+from app.services.logistics_data import normalize_hub_name
 from app.services.route_corridors import is_in_corridor
 from app.services.cargo_rules import is_cargo_compatible
 from app.services.event_logger import track_event
-from app.services.whatsapp_service import send_text, send_interactive_buttons
+from app.services.whatsapp_service import send_interactive_buttons
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +83,7 @@ async def _notify_truck_owner(user: User, load: LoadRequest) -> None:
         f"Route: {load.from_city.title()} → {load.to_city.title()}\n"
         f"Weight: {weight_tons} tons"
     )
-    buttons = [{"id": f"FIND_TRUCK", "title": "View Load"}]
+    buttons = [{"id": "POST_TRUCK", "title": "Post Truck"}]
     await send_interactive_buttons(user.phone, body, buttons)
 
 
@@ -95,7 +95,7 @@ async def _notify_shipper(user: User, listing: TruckSpaceListing) -> None:
         f"Route: {listing.from_city.title()} → {listing.to_city.title()}\n"
         f"Capacity: {capacity_tons} tons | ₹{listing.price_per_kg}/kg"
     )
-    buttons = [{"id": "FIND_TRUCK", "title": "🔍 View Truck"}]
+    buttons = [{"id": "POST_LOAD", "title": "📦 Post Load"}]
     await send_interactive_buttons(user.phone, body, buttons)
 
 
@@ -109,8 +109,8 @@ async def _notify_subscriber_load(user: User, load: LoadRequest) -> None:
         f"Load: {cargo} | {weight_tons} tons"
     )
     buttons = [
-        {"id": "FIND_TRUCK", "title": "📦 View Load"},
         {"id": "POST_TRUCK", "title": "🚚 Post Truck"},
+        {"id": "MAIN_MENU", "title": "🏠 Main Menu"},
     ]
     await send_interactive_buttons(user.phone, body, buttons)
 
@@ -124,8 +124,8 @@ async def _notify_subscriber_truck(user: User, listing: TruckSpaceListing) -> No
         f"Capacity: {capacity_tons} tons | ₹{listing.price_per_kg}/kg"
     )
     buttons = [
-        {"id": "FIND_TRUCK", "title": "📦 Post Load"},
-        {"id": "POST_TRUCK", "title": "🚚 View Truck"},
+        {"id": "POST_LOAD", "title": "📦 Post Load"},
+        {"id": "MAIN_MENU", "title": "🏠 Main Menu"},
     ]
     await send_interactive_buttons(user.phone, body, buttons)
 
@@ -150,11 +150,10 @@ async def notify_on_load_created(db: Session, load: LoadRequest) -> None:
             db.query(TruckSpaceListing, User)
             .join(User, TruckSpaceListing.owner_id == User.id)
             .filter(
-                TruckSpaceListing.from_city == load.from_city,
                 TruckSpaceListing.available_capacity_kg >= load.weight_kg,
                 TruckSpaceListing.status.in_([ListingStatus.open, ListingStatus.partial]),
             )
-            .limit(10)
+            .limit(50)
             .all()
         )
 
@@ -189,8 +188,8 @@ async def notify_on_load_created(db: Session, load: LoadRequest) -> None:
             db.query(RouteSubscription, User)
             .join(User, RouteSubscription.user_id == User.id)
             .filter(
-                RouteSubscription.normalized_pickup == load.from_city.lower(),
-                RouteSubscription.normalized_drop   == load.to_city.lower(),
+                RouteSubscription.normalized_pickup == normalize_hub_name(load.from_city),
+                RouteSubscription.normalized_drop == normalize_hub_name(load.to_city),
             )
             .limit(10)
             .all()
@@ -236,11 +235,10 @@ async def notify_on_truck_listed(db: Session, listing: TruckSpaceListing) -> Non
             db.query(LoadRequest, User)
             .join(User, LoadRequest.shipper_id == User.id)
             .filter(
-                LoadRequest.from_city == listing.from_city,
                 LoadRequest.weight_kg <= listing.available_capacity_kg,
                 LoadRequest.status == LoadRequestStatus.open,
             )
-            .limit(10)
+            .limit(50)
             .all()
         )
 
@@ -275,8 +273,8 @@ async def notify_on_truck_listed(db: Session, listing: TruckSpaceListing) -> Non
             db.query(RouteSubscription, User)
             .join(User, RouteSubscription.user_id == User.id)
             .filter(
-                RouteSubscription.normalized_pickup == listing.from_city.lower(),
-                RouteSubscription.normalized_drop   == listing.to_city.lower(),
+                RouteSubscription.normalized_pickup == normalize_hub_name(listing.from_city),
+                RouteSubscription.normalized_drop == normalize_hub_name(listing.to_city),
             )
             .limit(10)
             .all()

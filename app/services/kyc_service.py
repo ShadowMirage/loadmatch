@@ -1,11 +1,10 @@
 import logging
-from uuid import uuid4
 from sqlalchemy.orm import Session
 
 from app.models.kyc import KycDocument
-from app.models.enums import DocType
-from app.services.storage_service import upload_whatsapp_media
-from app.services.whatsapp_service import send_text
+from app.models.user import User
+from app.models.enums import DocType, KycFlowState
+from app.services import storage_service, whatsapp_service
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +27,7 @@ async def handle_kyc_image(
 
     try:
         # 1. Download from WhatsApp and upload to S3
-        file_url = await upload_whatsapp_media(media_id)
+        file_url = await storage_service.upload_whatsapp_media(media_id)
         logger.info("KYC image uploaded to S3: %s", file_url)
 
         # 2. Create DB record
@@ -39,11 +38,17 @@ async def handle_kyc_image(
             verified=False,
         )
         db.add(doc)
-        db.commit()
+        user = db.query(User).filter(User.id == user_id).first()
+        if user:
+            user.kyc_flow_state = KycFlowState.under_review
+        db.flush()
         logger.info("KycDocument record created for user_id=%s", user_id)
 
         # 3. Confirm to user
-        await send_text(phone, "✅ KYC document received. Our team will review it shortly.")
+        await whatsapp_service.send_text(
+            phone,
+            "✅ KYC document received. Our team will review it shortly.",
+        )
 
     except Exception as e:
         logger.error("KYC upload failed for user_id=%s: %s", user_id, e)
@@ -54,6 +59,9 @@ async def handle_kyc_image(
             "• Good lighting\n"
             "• Full card visible"
         )
-        from app.services.whatsapp_service import send_interactive_buttons
-        await send_interactive_buttons(phone, msg, [{"id": "MAIN_MENU", "title": "🏠 Main Menu"}])
-        return False
+        await whatsapp_service.send_interactive_buttons(
+            phone,
+            msg,
+            [{"id": "MAIN_MENU", "title": "🏠 Main Menu"}],
+        )
+        raise

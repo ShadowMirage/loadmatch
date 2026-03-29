@@ -20,7 +20,7 @@
       "num": 2,
       "name": "Clean Input (full freight request)",
       "passed": true,
-      "note": "Calls: 1, Texts: ['\u2139\ufe0f I need more info about your shipment.']",
+      "note": "Calls: 1, Texts: ['Please select an option:\\nWelcome to LoadMatch. How can I hel']",
       "fix": ""
     },
     {
@@ -34,21 +34,21 @@
       "num": 4,
       "name": "Partial Input (weight only)",
       "passed": true,
-      "note": "Calls: 1, Response: ['\u2139\ufe0f I need more info about your shipment.']",
+      "note": "Calls: 1, Response: ['Please select an option:\\nWelcome to LoadMatch. How can I hel']",
       "fix": ""
     },
     {
       "num": 5,
       "name": "Number Plate Detection (RJ14AB1234)",
       "passed": true,
-      "note": "Calls: 1, Response: ['\u2139\ufe0f I need more info about your shipment.']",
+      "note": "Calls: 1, Response: ['Please select an option:\\nWelcome to LoadMatch. How can I hel']",
       "fix": ""
     },
     {
       "num": 6,
       "name": "Button Routing (DELIVERY_STATUS)",
       "passed": true,
-      "note": "Calls: 1, Routed: True, Buttons: [1]",
+      "note": "Calls: 1, Routed: True, Buttons: [3]",
       "fix": ""
     },
     {
@@ -69,7 +69,7 @@
       "num": 9,
       "name": "Button Limit \u22643 across all tests",
       "passed": true,
-      "note": "Total interactive msgs: 11, Violations (>3 buttons): 0",
+      "note": "Total interactive msgs: 8, Violations (>3 buttons): 0",
       "fix": ""
     }
   ]

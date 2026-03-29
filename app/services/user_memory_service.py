@@ -1,8 +1,9 @@
-import json
 from sqlalchemy.orm import Session
+
 from app.models.user import User
 
-def update_user_memory(db: Session, user: User, data: dict):
+
+def update_user_memory(db: Session, user: User, data: dict, commit: bool = False):
     """
     Updates the JSON user memory payload with frequency tracks:
     - route frequency (from-to)
@@ -16,10 +17,10 @@ def update_user_memory(db: Session, user: User, data: dict):
     memory = user.memory_data if isinstance(user.memory_data, dict) else {}
 
     # Extract relevant fields
-    pickup = data.get("from", "").strip().lower()
-    drop = data.get("to", "").strip().lower()
+    pickup = str(data.get("from_city") or data.get("from") or "").strip().lower()
+    drop = str(data.get("to_city") or data.get("to") or "").strip().lower()
     weight = max(int(data.get("weight_kg") or 0), int(data.get("capacity_kg") or 0))
-    cargo = data.get("cargo", "").strip().lower()
+    cargo = str(data.get("cargo") or data.get("material_type") or "").strip().lower()
 
     # Track route
     if pickup and drop:
@@ -40,7 +41,10 @@ def update_user_memory(db: Session, user: User, data: dict):
         cargos[cargo] = cargos.get(cargo, 0) + 1
 
     user.memory_data = memory
-    db.commit()
+    if commit:
+        db.commit()
+    else:
+        db.flush()
 
 
 def personalize_response(user: User) -> str:

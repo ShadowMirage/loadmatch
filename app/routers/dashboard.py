@@ -3,6 +3,8 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.config import settings
+from app.models.load_request import LoadRequest
+from app.models.listing import TruckSpaceListing
 from app.routers import admin
 
 router = APIRouter(tags=["Dashboard"])

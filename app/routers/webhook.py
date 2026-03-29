@@ -1,33 +1,114 @@
 import logging
-from fastapi import APIRouter, Request, Response, Depends, HTTPException, Query
+import dataclasses
+import time
+from uuid import uuid4
+from datetime import date, datetime, timezone
+from typing import Optional, Tuple, Any
+
+from fastapi import APIRouter, Request, Response as FastAPIResponse, Depends, HTTPException, Query
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.config import settings
+from app.core.trace_context import set_trace_id
 from app.database import get_db
 from app.models.user import User
-from app.services.chatbot_service import handle_message
-from app.services.whatsapp_service import send_text, send_main_menu, response_sent_var
-from app.services.session_manager import get_session, get_session_data
-from app.services.workflow_router import route_interactive_payload, handle_new_user_onboarding, dispatch_ai_action, handle_text_command
-from app.services.event_logger import track_event
-from app.services.kyc_service import handle_kyc_image
-from app.services.deduplication_service import is_duplicate, mark_processed
-from app.services.rate_limiter import is_rate_limited
-from app.services.abuse_prevention import detect_spam
+from app.runtime.whatsapp_adapter import verify_token as get_verify_token
+from app.contracts.meta_intents import INTERRUPT_INTENTS
 
-logger = logging.getLogger(__name__)
+from app.services.session_manager import (
+    get_or_create_session,
+    get_session_data,
+    peek_session,
+    set_session_data,
+    update_session,
+)
+from app.contracts.extraction import ExtractionResult
+from app.services.extraction_engine import ExtractionEngine
+from app.services.intent_resolver import IntentResolver
+from app.services.payload_factory import PayloadFactory
+from app.services.state_machine_service import StateMachineService
+from app.services.idempotency_service import IdempotencyService
+from app.services.dispatcher_service import DispatcherService
+from app.services.recovery_service import RecoveryService
+from app.services.event_bus import EventBus
+from app.services import kyc_service
+from app.services.rate_limiter import check as rate_limit_check
+from app.services.whatsapp_service import send_text, safe_fallback
+from app.models.processed_message import ProcessedMessage, WorkflowEvent
 
+# ✅ SINGLE SOURCE OF TRUTH
+from app.contracts.responses import Response as ContractResponse
+from app.contracts.enums import Intent
+
+logger = logging.getLogger("loadmatch.webhook")
 router = APIRouter(prefix="/webhook", tags=["Webhook"])
 
-async def safe_fallback(phone: str):
+
+class AtomicDispatchError(RuntimeError):
+    def __init__(self, message: str, *, idem_key: Optional[str] = None):
+        super().__init__(message)
+        self.idem_key = idem_key
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _json_safe(val) for key, val in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, tuple):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    return value
+
+
+def _extract_messages(body: dict) -> list[dict]:
+    messages: list[dict] = []
+    for entry in body.get("entry", []):
+        for change in entry.get("changes", []):
+            value = change.get("value", {})
+            messages.extend(value.get("messages") or [])
+    return messages
+
+
+def _get_or_create_user(db: Session, phone: str) -> User:
+    user = db.query(User).filter(User.phone == phone).one_or_none()
+    if user:
+        return user
+
     try:
-        await send_text(
-            phone,
-            "⚠️ Temporary issue. Please try again.",
-            ignore_guard=True
-        )
-    except Exception as e:
-        logger.error(f"Critical failure in safe_fallback: {e}")
+        with db.begin_nested():
+            user = User(phone=phone)
+            db.add(user)
+            db.flush()
+            db.refresh(user)
+    except IntegrityError:
+        user = db.query(User).filter(User.phone == phone).one()
+
+    return user
+
+
+def _lock_user_for_dispatch(db: Session, phone: str) -> User:
+    query = db.query(User).filter(User.phone == phone)
+    if getattr(db.bind, "dialect", None) is not None and db.bind.dialect.name != "sqlite":
+        query = query.with_for_update()
+    return query.one()
+
+
+def _mark_failed_after_rollback(db: Session, idem_key: Optional[str]) -> None:
+    if not idem_key:
+        return
+
+    recovery_db = Session(bind=db.get_bind())
+    try:
+        IdempotencyService(recovery_db).mark_failed(idem_key)
+        recovery_db.commit()
+    except Exception:
+        recovery_db.rollback()
+        logger.exception("Failed to persist FAILED status for idempotency key %s", idem_key)
+    finally:
+        recovery_db.close()
+
 
 # ---------------------------------------------------------------------------
 # Webhook verification
@@ -35,129 +116,394 @@ async def safe_fallback(phone: str):
 
 @router.get("")
 def verify_webhook(
-    hub_mode:str = Query(None, alias="hub.mode"),
-    hub_verify_token:str = Query(None, alias="hub.verify_token"),
-    hub_challenge:str = Query(None, alias="hub.challenge"),
+    hub_mode: str = Query(None, alias="hub.mode"),
+    hub_verify_token: str = Query(None, alias="hub.verify_token"),
+    hub_challenge: str = Query(None, alias="hub.challenge"),
 ):
-    verify_token = settings.WHATSAPP_VERIFY_TOKEN or settings.whatsapp_verify_token
+    verify_token = get_verify_token()
     if hub_mode == "subscribe" and hub_verify_token == verify_token:
-        return Response(content=hub_challenge, media_type="text/plain")
+        return FastAPIResponse(content=hub_challenge, media_type="text/plain")
     raise HTTPException(status_code=403, detail="Verification failed")
 
+
 # ---------------------------------------------------------------------------
-# Incoming message handler (Mandated 9-Step Flow)
+# Phase 1: Resolve Intent (No DB writes except ProcessedMessage insert)
 # ---------------------------------------------------------------------------
+
+async def _phase1_resolve_intent(
+    msg: dict,
+    phone: str,
+    wa_id: Optional[str],
+    user: User,
+    db: Session,
+    extraction_engine: ExtractionEngine,
+    intent_resolver: IntentResolver,
+    payload_factory: PayloadFactory,
+    idempotency: IdempotencyService,
+) -> Tuple[Intent, Any, ExtractionResult, Optional[str]]:
+    """
+    Phase 1: Extraction, normalization, confidence assessment.
+    DB writes: ProcessedMessage insert ONLY (via idempotency check).
+    """
+    msg_type = msg.get("type")
+    raw_text = msg.get("text", {}).get("body", "").strip() if msg_type == "text" else ""
+
+    interactive_payload = None
+    if msg_type == "interactive":
+        interactive_payload = msg.get("interactive", {}).get("button_reply") or \
+                              msg.get("interactive", {}).get("list_reply")
+
+    # Idempotency early-exit: If message was already successfully handled, skip extraction
+    # but return enough context to allow Phase 2/3 to replay the response.
+    cached_intent_data = idempotency.fetch_cached_intent_data(wa_id) if wa_id else None
+    if cached_intent_data:
+        intent_val, data_val = cached_intent_data
+        logger.info(f"Replay detected for {wa_id}. Bypassing extraction.")
+        return intent_val, None, ExtractionResult(intent=intent_val, data=data_val, confidence=1.0, source="CACHE", trace_id=trace_id), None
+
+    session = peek_session(db, phone)
+    session_data = get_session_data(db, phone, user.id, create=False)
+    current_workflow = None
+    if session and session.current_workflow:
+        current_workflow = session.current_workflow
+    elif getattr(user, "state", None) not in (None, "IDLE"):
+        current_workflow = user.state
+
+    extraction = await extraction_engine.extract(raw_text, user, session_data)
+    logger.info(f"[EXTRACTION] intent={extraction.intent} fresh_data={extraction.data}")
+    intent = intent_resolver.resolve(extraction, interactive_payload, current_workflow, message_text=raw_text)
+
+    # Support partial updates (corrections): merge prior session_data with fresh extraction
+    # Fresh extraction keys take priority.
+    effective_session_data = session_data if isinstance(session_data, dict) else {}
+    interaction_data = {}
+    if interactive_payload:
+        interaction_data = {
+            "interactive_action_id": interactive_payload.get("id"),
+            "interactive_action_title": interactive_payload.get("title"),
+        }
+    if extraction.data:
+        extraction.data = {**effective_session_data, **interaction_data, **extraction.data}
+    else:
+        extraction.data = {**effective_session_data, **interaction_data}
+    
+    logger.info(f"[MERGED_DATA] intent={intent} merged_data={extraction.data}")
+
+    # Attempt payload construction. If it fails (missing fields), we don't crash.
+    # Interrupt intents (GREETING, MENU, UNKNOWN) carry no domain payload — skip build.
+    payload = None
+    if intent not in INTERRUPT_INTENTS:
+        try:
+            payload = payload_factory.build(intent, extraction.data)
+        except Exception as e:
+            logger.info(f"Payload validation deferred for {intent.value}: {e}")
+            # If we're already in a workflow, stay in it but ask for missing slots
+            intent = Intent.UNKNOWN
+
+    return intent, payload, extraction, current_workflow
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: Atomic Dispatch (DB writes allowed — dispatcher execution)
+# ---------------------------------------------------------------------------
+
+async def _phase2_atomic_dispatch(
+    phone: str,
+    wa_id: Optional[str],
+    db: Session,
+    trace_id: str,
+    intent: Intent,
+    payload: Any,
+    extraction: ExtractionResult,
+    idempotency: IdempotencyService,
+    state_machine: StateMachineService,
+) -> Tuple[Optional[ContractResponse], Optional[str], Optional[str]]:
+    """
+    Phase 2: Row-locking, state machine transition, dispatcher execution.
+    DB writes: Dispatcher mutations, state transitions.
+    Returns: (response, idem_key, pm_record_id)
+    """
+    response = None
+    idem_key = None
+    msg_id = None
+
+    tx_start = time.perf_counter()
+    lock_wait_time = 0.0
+    dispatcher_time = 0.0
+
+    # 1. Row-level lock acquisition
+    lock_start = time.perf_counter()
+    locked_user = _lock_user_for_dispatch(db, phone)
+    lock_wait_time = time.perf_counter() - lock_start
+
+    # Capture current state BEFORE transition for dispatcher context
+    current_db_state = getattr(locked_user, "state", "IDLE")
+
+    transition = state_machine.transition(
+        current_db_state,
+        intent,
+        locked_user.updated_at or datetime.now(timezone.utc)
+    )
+
+    if intent not in INTERRUPT_INTENTS and not transition.allowed:
+        logger.warning(f"Transition denied: {transition.error_message}")
+        response = ContractResponse(text=transition.error_message or "⚠️ Action not allowed.")
+        # Even on denial, we might want to save data if it was a correction attempt
+    else:
+        # Construct idempotency key (stable across replays)
+        idem_key = f"{locked_user.id}:{intent.value}:{wa_id}:{transition.next_state}"
+
+        # Safe payload serialization for ledger
+        try:
+            payload_dict = dataclasses.asdict(payload) if hasattr(payload, "__dataclass_fields__") else payload
+        except Exception:
+            payload_dict = {"action": str(intent.value), "data": str(payload)}
+        payload_dict = _json_safe(payload_dict)
+
+        request_payload = {
+            "intent": intent.value,
+            "payload": payload_dict,
+            "phone": phone,
+            "wa_id": wa_id,
+            "current_workflow": current_db_state,
+        }
+
+        # 2. Check/Start Idempotency Record
+        pm_record: ProcessedMessage = idempotency.start(
+            idem_key,
+            trace_id,
+            request_payload,
+            wamid=wa_id,
+            user_id=locked_user.id,
+            intent=intent.value,
+            confidence=extraction.confidence,
+            workflow_step=transition.next_state,
+            dispatcher_action=intent.value,
+            delivery_state="PENDING",
+        )
+        
+        if pm_record:
+            # Apply state transition
+            locked_user.state = transition.next_state
+
+            # 3. Dispatcher Execution
+            dispatch_start = time.perf_counter()
+            dispatcher = DispatcherService(db, locked_user.id, phone=phone)
+
+            try:
+                # Pass pre-transition state to dispatcher
+                response = dispatcher.execute(intent, payload, current_workflow=current_db_state)
+                dispatcher_time = time.perf_counter() - dispatch_start
+                idempotency.complete(idem_key, dataclasses.asdict(response))
+            except Exception as e:
+                logger.error(f"Execution failed for {idem_key}: {e}", exc_info=True)
+                raise AtomicDispatchError(str(e), idem_key=idem_key) from e
+            
+            msg_id = pm_record.id
+        else:
+            # Message already processing or completed; fetch existing response
+            cached_resp = idempotency.fetch_cached_response(wa_id) if wa_id else None
+            if cached_resp:
+                response = ContractResponse(**cached_resp)
+            else:
+                response = ContractResponse(text="Processing your request...")
+
+    # 4. Universal Session Persistence (Correction Safety)
+    # We save session data even if dispatch was skipped/denied to preserve conversational context.
+    get_or_create_session(db, phone, locked_user.id)
+    set_session_data(db, phone, locked_user.id, extraction.data)
+    next_session_workflow = getattr(locked_user, "state", "IDLE")
+    update_session(
+        db,
+        phone,
+        {"current_workflow": None if next_session_workflow == "IDLE" else next_session_workflow},
+        commit=False,
+    )
+
+    # 5. Atomic Commit (Single Source of Truth)
+    db.commit()
+
+    # Metrics
+    transaction_duration = time.perf_counter() - tx_start
+    logger.info(
+        f"[PHASE2_METRICS] user={locked_user.id} lock={lock_wait_time:.4f} "
+        f"dispatch={dispatcher_time:.4f} tx={transaction_duration:.4f}"
+    )
+
+    return response, idem_key, msg_id
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: Send Response (No DB writes except delivery telemetry)
+# ---------------------------------------------------------------------------
+
+async def _phase3_send_response(
+    phone: str,
+    wa_id: Optional[str],
+    response: Optional[ContractResponse],
+    idem_key: Optional[str],
+    msg_id: Optional[str],
+    db: Session,
+    recovery: RecoveryService,
+    idempotency: IdempotencyService,
+) -> None:
+    """
+    Phase 3: Egress delivery and telemetry update.
+    DB writes: WorkflowEvent (delivery telemetry) ONLY.
+    """
+    if not response:
+        return
+
+    try:
+        success = await recovery.send_with_backoff(phone, response, retries=1, wa_id=wa_id)
+        if success:
+            if idem_key:
+                # Bug #4 Fix: Reuse idempotency service from orchestrator param
+                idempotency.mark_delivered(idem_key)
+
+            if msg_id:
+                db.add(WorkflowEvent(
+                    processed_message_id=msg_id,
+                    event_type="DELIVERY_SUCCESS",
+                    trace_id=wa_id,
+                    payload={"source": "webhook_immediate"}
+                ))
+                db.commit()
+    except Exception as e:
+        logger.error(f"Egress failed for {idem_key}: {e}")
+        # RecoveryDaemon handles retries for SUCCESS jobs with delivered_at=NULL
+
+
+# ---------------------------------------------------------------------------
+# Incoming message handler (Orchestrator)
+# ---------------------------------------------------------------------------
+
+async def _process_message(msg: dict, db: Session) -> None:
+    trace_id = str(uuid4())
+    set_trace_id(trace_id)
+
+    event_bus = EventBus(trace_id)
+    extraction_engine = ExtractionEngine(trace_id)
+    intent_resolver = IntentResolver()
+    payload_factory = PayloadFactory()
+    state_machine = StateMachineService()
+    idempotency = IdempotencyService(db)
+    recovery = RecoveryService(db)
+
+    phone = msg.get("from")
+    wa_id = msg.get("id")
+    msg_type = msg.get("type")
+
+    try:
+        if not phone:
+            return
+
+        if wa_id and idempotency.exists(wa_id):
+            logger.info(f"Duplicate message detected before processing (wa_id: {wa_id}). Skipping.")
+            return
+
+        user = _get_or_create_user(db, phone)
+
+        if msg_type == "text":
+            raw_text = msg.get("text", {}).get("body", "").strip()
+            if rate_limit_check(db, str(user.id), raw_text):
+                db.commit()
+                await send_text(
+                    phone,
+                    "Too many repeated or invalid messages. Please slow down and send one clear request.",
+                    wa_id=wa_id,
+                )
+                return
+
+        if msg_type in {"image", "document"}:
+            media_id = msg.get(msg_type, {}).get("id")
+            if not media_id:
+                await send_text(phone, "⚠️ I could not read that document. Please try uploading it again.", wa_id=wa_id)
+                return
+
+            media_key = f"{user.id}:UPLOAD_KYC:{wa_id}:IDLE"
+            pm_record = idempotency.start(
+                media_key,
+                trace_id,
+                {
+                    "intent": Intent.UPLOAD_KYC.value,
+                    "payload": {"media_id": media_id, "message_type": msg_type},
+                    "phone": phone,
+                    "wa_id": wa_id,
+                    "current_workflow": getattr(user, "state", "IDLE"),
+                },
+                wamid=wa_id,
+                user_id=user.id,
+                intent=Intent.UPLOAD_KYC.value,
+                confidence=100,
+                workflow_step="UPLOAD_KYC",
+                dispatcher_action="UPLOAD_KYC",
+                delivery_state="PENDING",
+            )
+            if not pm_record:
+                return
+
+            try:
+                await kyc_service.handle_kyc_image(user.id, phone, media_id, db)
+                idempotency.complete(media_key, {"status": "received"})
+                idempotency.mark_delivered(media_key)
+                db.commit()
+            except Exception:
+                db.rollback()
+                idempotency.mark_failed(media_key)
+                db.commit()
+                raise
+            return
+
+        # === PHASE 1: Resolve Intent ===
+        intent, payload, extraction, current_wf = await _phase1_resolve_intent(
+            msg, phone, wa_id, user, db,
+            extraction_engine, intent_resolver, payload_factory, idempotency
+        )
+
+        if intent is None:
+            # Duplicate message or skip signal
+            return
+
+        # === PHASE 2: Atomic Dispatch ===
+        try:
+            response, idem_key, msg_id = await _phase2_atomic_dispatch(
+                phone, wa_id, db, trace_id,
+                intent, payload, extraction,
+                idempotency, state_machine
+            )
+        except Exception as e:
+            db.rollback()
+            db.expire_all()
+            _mark_failed_after_rollback(db, getattr(e, "idem_key", None))
+            logger.error(f"Atomic Section Failure: {e}", exc_info=True)
+            await safe_fallback(phone, wa_id=wa_id)
+            return
+
+        # === PHASE 3: Send Response ===
+        await _phase3_send_response(
+            phone, wa_id, response, idem_key, msg_id, db, recovery, idempotency
+        )
+
+        await event_bus.emit_async({
+            "event": intent.value,
+            "source": extraction.source,
+            "phone": phone,
+            "pii_redact": True,
+        })
+
+    except Exception as e:
+        db.rollback()
+        db.expire_all()
+        logger.error(f"Webhook outer failure: {e}", exc_info=True)
+        if phone:
+            await safe_fallback(phone, wa_id=wa_id)
+
 
 @router.post("")
 async def receive_webhook(request: Request, db: Session = Depends(get_db)):
-    """
-    Surgical Webhook Pipeline:
-    1. Deduplication | 2. Rate limit | 3. User | 4. Normalize | 5. SHORT-CIRCUIT
-    6. Commands | 7. AI Engine | 8. Dispatch | 9. Final Response Egress
-    """
-    # Initialize response guard
-    response_sent_var.set(False)
-
-    try:
-        body = await request.json()
-        messages = body.get("entry", [{}])[0].get("changes", [{}])[0].get("value", {}).get("messages", [])
-        if not messages:
-            return {"status": "ok"}
-
-        msg = messages[0]
-        phone = msg.get("from")
-        msg_type = msg.get("type")
-        wa_id = msg.get("id")
-
-        if not phone: return {"status": "ok"}
-
-        # 1. Deduplication
-        if wa_id and (is_duplicate(db, wa_id) or not mark_processed(db, wa_id)):
-            return {"status": "ok"}
-
-        # 2. Rate Limit & Anti-Spam
-        user = db.query(User).filter(User.phone == phone).first()
-        if user and (detect_spam(user.id, wa_id) or is_rate_limited(db, user.id)):
-            await send_text(phone, "⏳ Too many messages. Please wait.")
-            return {"status": "ok"}
-
-        # 3. User Fetch/Create
-        if not user:
-            user = User(phone=phone)
-            db.add(user)
-            db.commit()
-            db.refresh(user)
-
-        # 4. Input Normalization
-        raw_text = msg.get("text", {}).get("body", "").strip() if msg_type == "text" else ""
-        norm_text = raw_text.lower() if raw_text else ""
-        
-        # 5. SHORT-CIRCUIT (Mandated location)
-        session = get_session(db, phone, user.id)
-
-        if quick and quick.get("from") and quick.get("to"):
-            session_data = session.session_data if isinstance(session.session_data, dict) else {}
-            safe_quick = quick if isinstance(quick, dict) else {}
-            session_data = session.session_data if isinstance(session.session_data, dict) else {}
-            safe_quick = quick if isinstance(quick, dict) else {}
-
-            data = {**session_data, **safe_quick}
-            act = "confirm_truck_listing" if session.current_workflow == "TRUCK_FLOW" else "confirm_load_request"
-            await dispatch_ai_action(phone, {"action": act, "data": data}, user, db)
-            return {"status": "ok"}
-
-        # 6. Command Interception (Bypass AI)
-        if msg_type == "interactive":
-            payload_id = msg.get("interactive", {}).get("button_reply", {}).get("id") or \
-                         msg.get("interactive", {}).get("list_reply", {}).get("id")
-            if payload_id:
-                await route_interactive_payload(phone, payload_id, db, user)
-                return {"status": "ok"}
-
-        if msg_type == "text":
-            if norm_text in ["hi", "hello", "menu", "status"]:
-                await send_main_menu(phone)
-                return {"status": "ok"}
-            if await handle_text_command(phone, user, raw_text, db):
-                return {"status": "ok"}
-
-        # 7. AI / Deterministic Processing
-        if msg_type == "image":
-            await handle_kyc_image(user.id, phone, msg["image"]["id"], db)
-            return {"status": "ok"}
-
-        if msg_type == "text":
-            # Onboarding check
-            if not user.wa_onboarded:
-                if await handle_new_user_onboarding(phone, user, raw_text, "text", db):
-                    return {"status": "ok"}
-
-            # Standard AI Pipeline
-            reply, action = await handle_message(phone, raw_text, db)
-            print("DEBUG AI ACTION:", action, type(action))
-
-            # 🔒 ACTION SAFETY
-           # 🔒 FINAL SAFETY CHECK BEFORE DISPATCH
-            if not isinstance(action, dict):
-                print("⚠️ ACTION NOT DICT IN WEBHOOK:", action, type(action))
-                action = None
-
-            if action and "data" in action and not isinstance(action["data"], dict):
-                print("⚠️ ACTION DATA NOT DICT IN WEBHOOK:", action["data"], type(action["data"]))
-                action["data"] = {}
-            # 8. Action Dispatch
-            if action:
-                print("FINAL ACTION:", action, type(action))
-                await dispatch_ai_action(phone, action, user, db)
-            elif reply:
-                await send_text(phone, reply)
-            elif action:
-                await dispatch_ai_action(phone, action, user, db)
-            else:
-                await send_main_menu(phone)
-
-    except Exception as e:
-        logger.error(f"Surgical Webhook Pipeline Failure: {e}")
-        await safe_fallback(phone)
-
+    body = await request.json()
+    messages = _extract_messages(body)
+    for message in messages:
+        await _process_message(message, db)
     return {"status": "ok"}

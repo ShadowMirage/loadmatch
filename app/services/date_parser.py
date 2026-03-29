@@ -1,5 +1,4 @@
 import dateparser
-from datetime import datetime, timedelta
 
 def normalize_date(date_str: str) -> str:
     """

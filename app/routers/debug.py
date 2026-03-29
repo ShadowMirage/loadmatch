@@ -1,9 +1,9 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
+
 from app.database import get_db
 from app.models import EventLog
 from app.services.debug_logger import DebugLogger
-import json
 
 router = APIRouter(prefix="/debug", tags=["debug"])
 
@@ -18,12 +18,9 @@ def debug_dashboard(db: Session = Depends(get_db)):
         EventLog.event_type.like("DEBUG_%")
     ).order_by(EventLog.created_at.desc()).limit(50).all()
     
-    # Calculate health metrics
-    total_ai = db.query(EventLog).filter(EventLog.event_type == "DEBUG_AI_METRIC").count()
-    success_ai = db.query(EventLog).filter(
-        EventLog.event_type == "DEBUG_AI_METRIC",
-        EventLog.payload["val_status"].astext == "action_extracted"
-    ).count()
+    metric_logs = db.query(EventLog).filter(EventLog.event_type == "DEBUG_AI_METRIC").all()
+    total_ai = len(metric_logs)
+    success_ai = sum(1 for log in metric_logs if (log.data or {}).get("val_status") == "action_extracted")
     
     health = DebugLogger.get_system_health(db)
     if total_ai > 0:
@@ -36,7 +33,8 @@ def debug_dashboard(db: Session = Depends(get_db)):
                 "time": log.created_at.strftime("%Y-%m-%d %H:%M:%S"),
                 "type": log.event_type,
                 "user": log.user_id,
-                "payload": log.payload
+                "data": log.data or {},
+                "payload": log.data or {},
             } for log in logs
         ]
     }

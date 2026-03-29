@@ -8,7 +8,6 @@ import secrets
 import json
 import re
 from datetime import datetime
-from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.types import TypeDecorator, String
 from unittest.mock import AsyncMock, MagicMock, patch, call
@@ -28,7 +27,7 @@ mock_anthropic.messages = mock_messages
 patch('anthropic.AsyncAnthropic', return_value=mock_anthropic).start()
 
 # ── App imports ────────────────────────────────────────────────────────────
-from app.database import Base
+from app.database import build_engine, create_schema
 from app.models.user import User, UserRole
 from app.models.user_activity import UserActivity
 from app.models.conversation import Conversation
@@ -92,8 +91,8 @@ from fastapi import Request
 from starlette.datastructures import Headers
 
 # ── In-memory DB ───────────────────────────────────────────────────────────
-engine = create_engine("sqlite:///:memory:")
-Base.metadata.create_all(bind=engine)
+engine = build_engine("sqlite:///:memory:")
+create_schema(bind=engine)
 TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
@@ -124,8 +123,8 @@ def _make_body(msg):
 
 async def run_webhook(db, msg, phone="919999999999"):
     """Send single webhook and return captured WA calls."""
-    from app.services import whatsapp_service
-    whatsapp_service.response_sent_var.set(False)
+    from app.services.whatsapp_service import reset_response_guard
+    reset_response_guard()
     before = len(wa_calls)
     req = MockRequest(_make_body({**msg, "from": phone}))
     await receive_webhook(request=req, db=db)
@@ -294,8 +293,8 @@ async def run_validation():
 
     spam_calls = []
     for i in range(5):
-        from app.services import whatsapp_service
-        whatsapp_service.response_sent_var.set(False)
+        from app.services.whatsapp_service import reset_response_guard
+        reset_response_guard()
         before = len(wa_calls)
         req = MockRequest(_make_body({
             "from": spam_phone,
@@ -428,3 +427,4 @@ if __name__ == "__main__":
     with open("validation_report.json", "w") as f:
         json.dump(summary, f, indent=2)
     print("✅ Saved: validation_report.json")
+    raise SystemExit(0 if score == 100 else 1)

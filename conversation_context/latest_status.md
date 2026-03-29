@@ -1,0 +1,114 @@
+- [x] Phase 1: Concurrency Surge & Transaction Hygiene <!-- id: 1 -->
+- [x] Phase 2: Telemetry & Monitoring Root <!-- id: 10 -->
+- [x] Phase 3: Extraction Engine Authority <!-- id: 15 -->
+- [x] Phase 4: Button Serialization & Idempotency Fixes <!-- id: 25 -->
+- [x] Phase 5: Greeting Lane Fallback <!-- id: 35 -->
+- [x] Phase 6: UNKNOWN State Logic Consolidation <!-- id: 45 -->
+- [x] Phase 7: Payload Factory Fail-Fast Guards <!-- id: 50 -->
+- [x] Phase 8: ChatbotService Staged Cleanup <!-- id: 55 -->
+## Phase 12.1 Stabilization Sequence
+- [x] Stage 1: Core Lifecycle Observability
+  - [x] Add read_at, failed_at, execution_duration_ms to ProcessedMessage
+  - [x] Add replay_execution_hash for clustered replay safety
+  - [x] Add state_snapshot_hash to WorkflowEvent
+- [x] Stage 2: Schema-Driven Extraction Safety
+  - [x] Create extraction_schemas.py (Pydantic models)
+  - [x] Refactor ai_extraction.py to Attempt 1 (Pydantic), Attempt 2 (Regex), Attempt 3 (Heuristic)
+- [x] Stage 3: Confidence-Gated Arbitration
+  - [x] Hook extraction confidence score back into ExtractionResult
+  - [x] Update IntentResolver to assert >= 0.6 confidence, else route to UNKNOWN
+- [x] Stage 4: Redis Outage Safety Fallback
+  - [x] Setup ContextVar process-local lookup map for active requests
+  - [x] Add latency watchdog (<50ms) before Redis setnx
+
+## Debug Analysis & Stabilization
+- [x] Run full system debug analysis on 12 new files
+- [x] **Bug #1**: Fix `PayloadFactory.build()` using optimized-out `assert`
+- [x] **Bug #2**: Prevent IO calls (`send_main_menu`) inside Phase 2 DB boundary
+- [x] **Bug #3**: Fix `dataclasses.asdict` crashing on `GenericActionPayload`
+- [x] **Bug #4**: Ensure Phase 3 reuses orchestrator's `IdempotencyService`
+- [x] **Bug #5**: Fix `update_session` nesting bug when committing conversational state
+- [x] **Bug #6**: Migrate rich interactive routing from orphaned workflow_router
+- [x] **Bug #7**: Fix Intent enum split-import fragility
+- [x] **Bug #8**: Relax strictly enforced payload constraints causing conversational unhandled drops
+- [x] **Bug #9**: Add strict `ContractResponse` types to egress `RecoveryService`
+- [x] **Bug #10**: Put first-message user creation in SAVEPOINT for cluster concurrency
+- [x] **Bug #11**: Generate dynamic booking IDs and truck lists directly in `DispatcherService`
+- [x] **Bug #12**: Share redis connection globally in `ExtractionEngine`
+- [x] Phase 9: System Reliability Consolidation & Verification <!-- id: 60 -->
+    - [x] Implement Button Serialization Fix <!-- id: 61 -->
+    - [x] Add Intent Import to Webhook <!-- id: 62 -->
+    - [x] Verify Greeting Lane Stability <!-- id: 63 -->
+    - [x] Final Reliability Audit <!-- id: 64 -->
+    - [x] Generate `reliability_report.md` <!-- id: 65 -->
+- [x] Implementation of Recommended Fixes (v9 Consolidation) <!-- id: 66 -->
+- [x] Phase 10: Distributed Workflow Runtime <!-- id: 67 -->
+    - [x] [PLAN] Authoritative Implementation Order & Replay Safety <!-- id: 68 -->
+    - [x] [PLAN] Worker Timeout Fix (`run_in_threadpool`) <!-- id: 69 -->
+    - [x] [PLAN] LLM Extraction Resilience (Retry + Jitter) <!-- id: 70 -->
+    - [x] [EXEC] Step 1: `trace_context.py` & Logging Filter <!-- id: 71 -->
+    - [x] [EXEC] Step 2: Migration: `processed_messages` Ledger Columns <!-- id: 72 -->
+    - [x] [EXEC] Step 3: IdempotencyService: Trace & DLQ methods <!-- id: 73 -->
+    - [x] [EXEC] Step 4-6: Webhook Threadpooled Locks & Trace Init <!-- id: 74 -->
+    - [x] [EXEC] Step 7-8: Exception Routing & Extraction Jitter <!-- id: 75 -->
+    - [x] [EXEC] Step 9: RecoveryDaemon Replay Engine <!-- id: 76 -->
+    - [x] [VERIFY] Trace Correlation Audit <!-- id: 77 -->
+    - [x] [VERIFY] Concurrency Surge (v2) Test <!-- id: 78 -->
+    - [x] [VERIFY] Atomic Rollback Replay Test <!-- id: 79 -->
+    - [x] [VERIFY] Cross-Worker Replay Arbitration Test <!-- id: 80 -->
+    - [x] [VERIFY] SAVEPOINT Replay Integrity Test <!-- id: 81 -->
+- [x] Phase 10.1: Distributed Workflow Maturation <!-- id: 82 -->
+    - [x] [PLAN] Distributed Replay Lock (`SKIP LOCKED`) <!-- id: 83 -->
+    - [x] [PLAN] Two-Phase Ledger Ownership (`execution_owner`) <!-- id: 84 -->
+    - [x] [PLAN] Unified Zombie Contract (`is_zombie`) <!-- id: 85 -->
+    - [x] [PLAN] Async Stability: Daemon-owned Egress Retries <!-- id: 86 -->
+    - [x] [PLAN] Enterprise Auditability (`workflow_events`) <!-- id: 93 -->
+    - [x] [PLAN] Multi-Tenancy Readiness (`tenant_id`) <!-- id: 94 -->
+    - [x] [EXEC] Migration: Recovery Maturation & Audit Tables <!-- id: 87 -->
+    - [x] [EXEC] Shared Utility: Recovery Core Logic <!-- id: 88 -->
+    - [x] [EXEC] Maturation: RecoveryDaemon distributed logic <!-- id: 89 -->
+    - [x] [EXEC] Maturation: Webhook Egress Refactor <!-- id: 90 -->
+    - [x] [VERIFY] Cross-Worker Arbitration Simulation <!-- id: 91 -->
+    - [x] [VERIFY] Auditor Timeline Validation <!-- id: 92 -->
+
+- [x] Phase 11.2: Cluster-Ready Reliability & Performance <!-- id: 100 -->
+    - [x] [INFRA] Add Redis to Docker & Config <!-- id: 101 -->
+    - [x] [EXEC] Redis-backed Cluster Circuit Breaker <!-- id: 102 -->
+    - [x] [EXEC] Idempotency: Trace-preserving UPDATE pattern <!-- id: 103 -->
+    - [x] [EXEC] Recovery: EXECUTING Reclaim Logic <!-- id: 104 -->
+    - [x] [EXEC] Webhook: Unified User Query & pm_id Return <!-- id: 105 -->
+    - [x] [DB] Migration: `idx_execution_reclaim` <!-- id: 106 -->
+    - [x] [EXEC] Dispatcher: Intent-based Pickup Date <!-- id: 107 -->
+    - [x] [EXEC] Zero-window Startup Sweep in main.py <!-- id: 108 -->
+    - [x] [EXEC] Leaf-based Contracts Refactor <!-- id: 109 -->
+- [x] Phase 11.3: Verification & Final Walkthrough <!-- id: 110 -->
+    - [x] [VERIFY] Redis CB Sync Validation <!-- id: 111 -->
+    - [x] [VERIFY] Reclaim Ownership Simulation <!-- id: 112 -->
+    - [x] [VERIFY] SQL Query Count Audit <!-- id: 113 -->
+    - [x] [FINALIZE] Generate Phase 11.2 Walkthrough <!-- id: 114 -->
+- [x] Phase 11.4: Detailed System Audit (Phase 2) <!-- id: 115 -->
+    - [x] [AUDIT] Deep Dive: WhatsApp & Workflow Services <!-- id: 116 -->
+    - [x] [AUDIT] Deep Dive: Matching & AI Extraction <!-- id: 117 -->
+- [x] Phase 12: Application-Layer Correctness & UX Resilience <!-- id: 119 -->
+    - [x] [PLAN] implementation_plan_v5.md <!-- id: 120 -->
+    - [x] [EXEC] Step 1: Correctness (Weight NameError, Sanitization, Extraction) <!-- id: 121 -->
+    - [x] [EXEC] Step 2: Ranking (Unified Scoring, Batch Flush, List Fallback) <!-- id: 122 -->
+    - [x] [EXEC] Step 3: Scaling (SQL Filters, Redis Send Guard, Config Norm) <!-- id: 123 -->
+    - [x] [VERIFY] Flow Integrity & Performance Audit <!-- id: 124 -->
+    - [x] [AUDIT] Technical Deep-Dive & Debug Analysis (`debug_deep_analysis.md`) <!-- id: 125 -->
+    - [x] [AUDIT] System Workflow & Stability Blueprint (`system_workflow_audit.md`) <!-- id: 133 -->
+- [/] Phase 12.1: Tier-4 Stabilization (v7.3) <!-- id: 126 -->
+    - [x] [PLAN] Implementation Plan v7.3 (`implementation_plan_v7.3.md`) <!-- id: 127 -->
+    - [x] [EXEC] Stage 1: Webhook Decomposition + ThreadPool(64) <!-- id: 128 -->
+    - [x] [EXEC] Stage 2: Redis Latency Watchdog + SQL Atomic Guard + Telemetry Migration <!-- id: 129 -->
+    - [x] [EXEC] Stage 3: Pydantic Extraction Migration <!-- id: 130 -->
+    - [x] [EXEC] Stage 4: Confidence Routing Activation <!-- id: 131 -->
+    - [ ] [VERIFY] Tier-4 Certification Checklist <!-- id: 132 -->
+- [ ] Phase 13: Adaptive Conversational Orchestration Engine (v7.3) <!-- id: 135 -->
+    - [ ] [EXEC] Stage 5: Extraction Determinism Validation <!-- id: 140 -->
+    - [ ] [EXEC] Stage 6: Extraction Arbitrator <!-- id: 141 -->
+    - [ ] [EXEC] Stage 7: ConversationStateGraph <!-- id: 137 -->
+    - [ ] [EXEC] Stage 8: Slot Versioning Engine <!-- id: 142 -->
+    - [ ] [EXEC] Stage 9: Intent Drift Detector (observe) <!-- id: 143 -->
+    - [ ] [EXEC] Stage 10-11: Telemetry Signal Adapter + Feedback Engine <!-- id: 144 -->
+    - [ ] [EXEC] Stage 12-13: Adaptive Router (shadow → active) <!-- id: 138 -->

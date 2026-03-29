@@ -23,10 +23,12 @@ class User(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     # Intelligence Layer Fields
+    state = Column(String(50), default="IDLE", nullable=False)
     memory_data = Column(JSON, default=dict, nullable=False)
     completion_rate = Column(Float, default=1.0, nullable=False)
     cancellation_rate = Column(Float, default=0.0, nullable=False)
     rating = Column(Float, default=5.0, nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
     sessions = relationship("UserSession", back_populates="user", cascade="all, delete-orphan")
     events = relationship("EventLog", back_populates="user", cascade="all, delete-orphan")

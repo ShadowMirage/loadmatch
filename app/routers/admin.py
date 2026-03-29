@@ -6,7 +6,7 @@ from pydantic import BaseModel
 
 from app.database import get_db
 from app.config import settings
-from app.models.enums import UserRole, KycFlowState, DocType, MatchStatus, ListingStatus, LoadRequestStatus
+from app.models.enums import KycFlowState, MatchStatus, ListingStatus, LoadRequestStatus
 from app.models.user import User
 from app.models.kyc import KycDocument
 from app.models.match import Match

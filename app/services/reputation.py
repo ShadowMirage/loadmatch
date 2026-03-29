@@ -1,7 +1,9 @@
 from sqlalchemy.orm import Session
+
 from app.models.user import User
 
-def compute_reputation(user: User, db: Session) -> float:
+
+def compute_reputation(user: User, db: Session, commit: bool = False) -> float:
     """
     Computes a 0.0 - 5.0 rating dynamically for a user.
     Formula: (completion_rate * 0.4) + ((1 - cancellation_rate) * 0.3) + (rating * 0.3)
@@ -28,6 +30,9 @@ def compute_reputation(user: User, db: Session) -> float:
     
     # Update DB caching
     user.rating = final_score
-    db.commit()
+    if commit:
+        db.commit()
+    else:
+        db.flush()
     
     return final_score

@@ -7,7 +7,8 @@ LoadMatch is an intelligent WhatsApp-based assistant for Indian truck owners and
 2. Ensure you have Docker and Docker-Compose installed.
 3. Run `cp .env.example .env`.
 4. Open the `.env` file and fill in the required keys:
-   - `DATABASE_URL` (local development should default to `postgresql://postgres:postgres@localhost:5432/loadmatch`)
+   - `DATABASE_URL` (`postgresql+psycopg2://postgres:postgres@db:5432/loadmatch` for Docker Compose, or switch `db` to `localhost` if you run the app directly on your host)
+   - `REDIS_URL` (`redis://redis:6379/0` for Docker Compose, or switch `redis` to `localhost` for host-native runs)
    - `WA_TOKEN` & `WA_PHONE_NUMBER_ID` & `WA_VERIFY_TOKEN` (From Facebook Developer Portal)
    - `ANTHROPIC_API_KEY` (Your Claude API Key)
    - `AWS_ACCESS_KEY`, `AWS_SECRET_KEY`, `AWS_REGION`, `S3_BUCKET` (For storing KYC credentials)
