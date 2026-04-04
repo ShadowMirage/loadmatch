@@ -144,6 +144,8 @@ class ExtractionEngine:
                     # ✅ Authoritative Normalization
                     raw_data = ai_result.get("data", {})
                     data = normalize_entities(raw_data)
+                    if data:
+                        data.setdefault("confidence_source", "llm_structured")
                     
                     logger.debug("[ENTITY_SCHEMA] %s | confidence=%.2f", data, confidence)
                     
@@ -173,6 +175,8 @@ class ExtractionEngine:
         
         # ✅ Authoritative Normalization Fallback
         data = normalize_entities(regex_data)
+        if data:
+            data.setdefault("confidence_source", "regex")
         
         logger.debug("[ENTITY_SCHEMA] %s", data)
         

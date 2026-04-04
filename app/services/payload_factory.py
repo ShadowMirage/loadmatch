@@ -1,4 +1,5 @@
 import logging
+import dataclasses
 from typing import Any, Dict
 from app.contracts.enums import Intent
 from app.contracts.payloads import CreateLoadPayload, PostTruckPayload, GenericActionPayload
@@ -17,6 +18,29 @@ class PayloadFactory:
         # Intent.CONFIRM: GenericActionPayload,
         # Intent.CANCEL: GenericActionPayload,
     }
+
+    @staticmethod
+    def serialize(payload: Any) -> Any:
+        if dataclasses.is_dataclass(payload):
+            return dataclasses.asdict(payload)
+        return payload
+
+    @staticmethod
+    def extract_replay_data(request_payload: Dict[str, Any] | None) -> Dict[str, Any]:
+        request_payload = request_payload or {}
+
+        extraction_data = request_payload.get("extraction_data")
+        if isinstance(extraction_data, dict):
+            return extraction_data
+
+        payload_data = request_payload.get("payload")
+        if isinstance(payload_data, dict):
+            action_data = payload_data.get("data")
+            if isinstance(action_data, dict):
+                return action_data
+            return payload_data
+
+        return {}
 
     def build(self, intent: Intent, data: Dict[str, Any]) -> Any:
         normalized_data = self._normalize_aliases(intent, data or {})
@@ -43,7 +67,6 @@ class PayloadFactory:
 
         try:
             # 🔒 STRICT FILTERING: Only pass fields that exist in the dataclass
-            import dataclasses
             valid_fields = {f.name for f in dataclasses.fields(payload_class)}
             filtered_data = {k: v for k, v in normalized_data.items() if k in valid_fields}
             

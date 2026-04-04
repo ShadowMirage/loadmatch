@@ -25,3 +25,23 @@ def test_extraction_confidence_cap(extraction_engine):
         # Assert
         assert result.confidence <= 0.50
         assert result.source == "REGEX"
+        assert result.data["confidence_source"] == "regex"
+
+
+def test_llm_extraction_tags_structured_confidence_source(extraction_engine):
+    ai_result = {
+        "action": "confirm_load_request",
+        "confidence": 0.95,
+        "data": {
+            "from_city": "delhi",
+            "to_city": "jaipur",
+            "weight_kg": 5000,
+        },
+    }
+
+    with patch.object(extraction_engine, "_should_use_llm", return_value=True), \
+         patch("app.services.extraction_engine.extract_with_context", return_value=ai_result):
+        result = asyncio.run(extraction_engine.extract("delhi to jaipur 5 ton", user=None, session_data={}))
+
+    assert result.source == "LLM"
+    assert result.data["confidence_source"] == "llm_structured"

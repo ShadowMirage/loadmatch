@@ -3,9 +3,9 @@ from typing import Optional, Dict, Any
 from app.contracts.enums import Intent
 from app.contracts.extraction import ExtractionResult
 from app.services.logistics_data import (
-    CITY_LOGISTICS_HUBS, CITY_ALIASES, ROUTE_CONNECTORS, 
-    normalize_hub_name, is_corridor_route, CorridorSource, get_corridor_source,
-    LaneClass, get_lane_class
+    CITY_LOGISTICS_HUBS, CITY_ALIASES, ROUTE_CONNECTORS,
+    normalize_hub_name, CorridorSource, get_corridor_source,
+    get_lane_class, RESOLVER_VERSION
 )
 from app.services.meta_intents import is_greeting
 
@@ -22,8 +22,6 @@ class IntentResolver:
         current_workflow: Optional[str],
         message_text: Optional[str] = ""
     ) -> Intent:
-        # Resolver constant
-        RESOLVER_VERSION = "v3_corridor_payload_acceleration"
         """
         3-Input Deterministic Resolver with Stage 4 Confidence Routing.
         
@@ -84,7 +82,12 @@ class IntentResolver:
         
         # 3. Heuristic Intent (Corridor & Keyword detection)
         # This layer can push confidence to 1.0 and override LLM UNKNOWN
-        heuristic = self._heuristic_resolve_text(message_text, extraction, RESOLVER_VERSION)
+        heuristic = self._heuristic_resolve_text(
+            message_text,
+            extraction,
+            current_workflow,
+            RESOLVER_VERSION,
+        )
         if heuristic:
             return heuristic
 
@@ -113,7 +116,86 @@ class IntentResolver:
     # is_greeting moved to app/services/meta_intents.py
 
     @staticmethod
-    def _heuristic_resolve_text(text: Optional[str], extraction: ExtractionResult, version: str) -> Optional[Intent]:
+    def _corridor_intent_for_workflow(current_workflow: Optional[str]) -> Intent:
+        if current_workflow == "TRUCK_FLOW":
+            return Intent.POST_TRUCK
+        return Intent.CREATE_LOAD
+
+    @staticmethod
+    def _explicit_keyword_intent(lower_text: str, token_set: set[str]) -> Optional[Intent]:
+        load_phrases = (
+            "post load",
+            "need load",
+            "have a load",
+            "have load",
+            "i have load",
+            "i have a load",
+        )
+        truck_phrases = (
+            "post truck",
+            "need truck",
+            "have a truck",
+            "have truck",
+            "truck available",
+            "vehicle available",
+            "empty truck",
+            "truck empty",
+        )
+
+        if any(phrase in lower_text for phrase in load_phrases):
+            return Intent.CREATE_LOAD
+        if any(phrase in lower_text for phrase in truck_phrases):
+            return Intent.POST_TRUCK
+
+        load_tokens = {"load"}
+        truck_tokens = {"truck", "vehicle", "lorry", "tempo", "lorries", "gaadi"}
+        has_load = bool(token_set & load_tokens)
+        has_truck = bool(token_set & truck_tokens)
+
+        if has_load and not has_truck:
+            return Intent.CREATE_LOAD
+        if has_truck and not has_load:
+            return Intent.POST_TRUCK
+        return None
+
+    @classmethod
+    def _apply_corridor_metadata(
+        cls,
+        extraction: ExtractionResult,
+        *,
+        city_from: str,
+        city_to: str,
+        corridor_source: CorridorSource,
+        lane_detected_via: str,
+        version: str,
+        current_workflow: Optional[str],
+        explicit_intent: Optional[Intent],
+    ) -> Intent:
+        extraction.data.update({
+            "from_city": city_from,
+            "to_city": city_to,
+            "lane_cities": [city_from, city_to],
+            "lane_key": ":".join(sorted([city_from, city_to])),
+            "directional_lane_key": f"{city_from}->{city_to}",
+            "reverse_directional_lane_key": f"{city_to}->{city_from}",
+            "lane_class": get_lane_class(city_from, city_to),
+            "corridor_detected": True,
+            "corridor_source": corridor_source,
+            "confidence_source": "corridor_detection",
+            "lane_detected_via": lane_detected_via,
+            "resolver_version": version,
+        })
+        extraction.confidence = 1.0
+        return explicit_intent or cls._corridor_intent_for_workflow(current_workflow)
+
+    @classmethod
+    def _heuristic_resolve_text(
+        cls,
+        text: Optional[str],
+        extraction: ExtractionResult,
+        current_workflow: Optional[str],
+        version: str,
+    ) -> Optional[Intent]:
         if not text:
             return None
         
@@ -122,6 +204,7 @@ class IntentResolver:
         processed_text = lower_text.replace("-", " - ").replace("/", " / ")
         tokens = processed_text.split()
         token_set = set(tokens)
+        explicit_intent = cls._explicit_keyword_intent(lower_text, token_set)
 
         # Helper to check for city entities in a window
         def check_multiword_at(tokens_list, index) -> Optional[tuple[str, str]]:
@@ -161,24 +244,16 @@ class IntentResolver:
                     city_to, raw_to = res_to
                     
                     logger.info(f"[CORRIDOR_DETECT] Found route: {city_from} -> {city_to}. Boosting confidence to 1.0.")
-                    
-                    # Production Payload Attributes (v3.1)
-                    extraction.data.update({
-                        "from_city": city_from,
-                        "to_city": city_to,
-                        "lane_cities": [city_from, city_to],
-                        "lane_key": ":".join(sorted([city_from, city_to])),
-                        "directional_lane_key": f"{city_from}->{city_to}",
-                        "reverse_directional_lane_key": f"{city_to}->{city_from}",
-                        "lane_class": get_lane_class(city_from, city_to),
-                        "corridor_detected": True,
-                        "corridor_source": get_corridor_source(raw_from, raw_to),
-                        "confidence_source": "corridor_detection",
-                        "lane_detected_via": "separator_window",
-                        "resolver_version": version
-                    })
-                    extraction.confidence = 1.0
-                    return Intent.CREATE_LOAD
+                    return cls._apply_corridor_metadata(
+                        extraction,
+                        city_from=city_from,
+                        city_to=city_to,
+                        corridor_source=get_corridor_source(raw_from, raw_to),
+                        lane_detected_via="separator_window",
+                        version=version,
+                        current_workflow=current_workflow,
+                        explicit_intent=explicit_intent,
+                    )
 
         # 2. Adjacency Shorthand (delhi jaipur, delhi/jaipur, jaipur delhi route)
         # Find all recognized cities in the message
@@ -206,23 +281,21 @@ class IntentResolver:
         if len(found_cities) >= 2:
             # delhi-jaipur, delhi jaipur route, etc.
             city_from, city_to = found_cities[0], found_cities[1]
-            extraction.data.update({
-                "from_city": city_from,
-                "to_city": city_to,
-                "lane_cities": [city_from, city_to],
-                "lane_key": ":".join(sorted([city_from, city_to])),
-                "directional_lane_key": f"{city_from}->{city_to}",
-                "reverse_directional_lane_key": f"{city_to}->{city_from}",
-                "lane_class": get_lane_class(city_from, city_to),
-                "corridor_detected": True,
-                "corridor_source": CorridorSource.ADJACENT_CITY_PAIR,
-                "confidence_source": "corridor_detection",
-                "lane_detected_via": "adjacent_tokens",
-                "resolver_version": version
-            })
-            extraction.confidence = 1.0
             logger.info(f"[ADJACENCY_DETECT] Found city pair: {city_from} {city_to}. Payload enriched.")
-            return Intent.CREATE_LOAD
+            return cls._apply_corridor_metadata(
+                extraction,
+                city_from=city_from,
+                city_to=city_to,
+                corridor_source=CorridorSource.ADJACENT_CITY_PAIR,
+                lane_detected_via="adjacent_tokens",
+                version=version,
+                current_workflow=current_workflow,
+                explicit_intent=explicit_intent,
+            )
+
+        if explicit_intent:
+            extraction.confidence = min(extraction.confidence + 0.25, 0.92)
+            return explicit_intent
 
         # 3. Token-Cluster Signals (Marketplace priority)
         LOAD_SIGNALS = {

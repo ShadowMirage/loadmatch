@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.models.processed_message import ProcessedMessage
 from app.contracts.enums import Intent
+from app.services.payload_factory import PayloadFactory
 
 
 class IdempotencyService:
@@ -43,19 +44,19 @@ class IdempotencyService:
         return None
 
     def fetch_cached_intent_data(self, wa_id: str) -> Optional[tuple[Intent, dict]]:
-        """Retrieves intent and extraction data for a duplicate to bypass extraction."""
+        """Retrieves replay-safe intent/extraction data for a completed duplicate only."""
         record = self.find_record(wa_id)
-        if record:
-            from app.contracts.enums import Intent
-            try:
-                intent_val = Intent(record.intent)
-            except (ValueError, TypeError):
-                intent_val = Intent.UNKNOWN
-            
-            payload = record.request_payload or {}
-            extraction_data = payload.get("payload") or {}
-            return intent_val, extraction_data
-        return None
+        if not record or record.status != "SUCCESS":
+            return None
+
+        from app.contracts.enums import Intent
+        try:
+            intent_val = Intent(record.intent)
+        except (ValueError, TypeError):
+            intent_val = Intent.UNKNOWN
+
+        extraction_data = PayloadFactory.extract_replay_data(record.request_payload)
+        return intent_val, extraction_data
 
     def start(
         self,

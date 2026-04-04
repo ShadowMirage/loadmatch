@@ -60,6 +60,14 @@ class ProcessedMessage(Base):
 
     replay_execution_hash = Column(String(128), nullable=False)
 
+    # extraction_data is the canonical routing signal snapshot captured at
+    # Phase 1 resolution time. It MUST remain stable across replay and recovery.
+    # Dispatcher logic, recovery replay, and duplicate-delivery suppression rely
+    # on this structure for deterministic behavior.
+    #
+    # Replay contract: request_payload["extraction_data"] is required for
+    # deterministic replay stability and routing/audit fidelity.
+    # Do not remove, rename, or recompute without a migration/backfill plan.
     request_payload = Column(JSONB, nullable=True)
     response_payload = Column(JSONB, nullable=True)
     error_log = Column(JSONB, nullable=True)

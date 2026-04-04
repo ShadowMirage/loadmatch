@@ -1,4 +1,5 @@
 import datetime
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.models.enums import UserRole, KycFlowState, LoadRequestStatus, TruckType, ListingStatus, DocType
@@ -8,7 +9,7 @@ from app.models.truck import Truck
 from app.models.listing import TruckSpaceListing
 from app.models.match import Match
 from app.models.kyc import KycDocument
-from app.services.logistics_data import normalize_hub_name
+from app.services.logistics_data import CITY_ALIASES, normalize_hub_name
 from app.services.matching_service import find_matches_for_load, update_listing_capacity_after_match
 from app.services.storage_service import upload_whatsapp_media
 
@@ -111,6 +112,32 @@ TOOLS = [
     }
 ]
 
+
+def _canonical_city(value):
+    if not value:
+        return None
+    normalized = normalize_hub_name(value)
+    if normalized:
+        return normalized
+    stripped = str(value).strip().lower()
+    return stripped or None
+
+
+def _backhaul_city_candidates(value):
+    canonical = _canonical_city(value)
+    candidates: set[str] = set()
+    raw_value = str(value or "").strip().lower()
+    if raw_value:
+        candidates.add(raw_value)
+    if canonical:
+        candidates.add(canonical)
+        candidates.update(alias for alias, resolved in CITY_ALIASES.items() if resolved == canonical)
+    return candidates
+
+
+def _is_backhaul_origin_match(load_from_city, listing_to_city):
+    return _canonical_city(load_from_city) == _canonical_city(listing_to_city)
+
 async def execute_tool(name: str, args: dict, db: Session, user: User) -> dict:
     if name == "set_user_profile":
         user.name = args["name"]
@@ -212,14 +239,17 @@ async def execute_tool(name: str, args: dict, db: Session, user: User) -> dict:
         # Backhaul Matching Logic
         from app.services.route_corridors import is_in_corridor
         from app.services.whatsapp_service import send_text
-        
+
+        candidate_cities = _backhaul_city_candidates(listing.to_city)
         backhaul_loads = db.query(LoadRequest).filter(
             LoadRequest.status == LoadRequestStatus.open,
-            LoadRequest.from_city == listing.to_city
+            func.lower(LoadRequest.from_city).in_(candidate_cities)
         ).all()
         
         valid_backhauls = []
         for bl in backhaul_loads:
+            if not _is_backhaul_origin_match(bl.from_city, listing.to_city):
+                continue
             # Corridor check returning to origin
             if is_in_corridor(bl.from_city, bl.to_city, listing.to_city, listing.from_city):
                 # Capacity wrapper limit check

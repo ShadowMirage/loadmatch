@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 
 from app.contracts.responses import Response, coerce_response
 from app.contracts.enums import Intent
+from app.contracts.route_confidence import RouteConfidence
 from app.main import health_check
 from app.models.load_request import LoadRequest
 from app.models.listing import TruckSpaceListing
@@ -14,9 +15,11 @@ from app.services.ai_extraction_service import _normalize_parsed_result
 from app.services.dispatcher_service import DispatcherService
 from app.services.extraction_engine import ExtractionResult
 from app.services.intent_resolver import IntentResolver
-from app.routers.webhook import _extract_messages
+from app.services.logistics_data import RESOLVER_VERSION
+from app.routers.webhook import _extract_messages, _phase2_atomic_dispatch
 from app.services.recovery_daemon import RecoveryDaemon
 from app.services.recovery_service import RecoveryService
+from app.services.idempotency_service import IdempotencyService
 from app.services.supply_visibility_service import (
     _notify_shipper,
     _notify_subscriber_load,
@@ -189,6 +192,74 @@ def test_intent_resolver_keeps_partial_correction_inside_load_flow():
     assert intent == Intent.CREATE_LOAD
 
 
+def test_truck_flow_corridor_enrichment_without_intent_flip():
+    resolver = IntentResolver()
+    extraction = ExtractionResult(
+        intent=Intent.UNKNOWN,
+        data={},
+        confidence=0.0,
+        source="TEST",
+        trace_id="trace-truck-flow",
+    )
+
+    intent = resolver.resolve(
+        extraction,
+        interactive_payload=None,
+        current_workflow="TRUCK_FLOW",
+        message_text="delhi to jaipur",
+    )
+
+    assert intent == Intent.POST_TRUCK
+    assert extraction.data["from_city"] == "delhi"
+    assert extraction.data["to_city"] == "jaipur"
+    assert extraction.data["lane_key"] == "delhi:jaipur"
+    assert extraction.data["corridor_detected"] is True
+
+
+def test_explicit_load_intent_overrides_truck_flow_corridor_anchor():
+    resolver = IntentResolver()
+    extraction = ExtractionResult(
+        intent=Intent.UNKNOWN,
+        data={},
+        confidence=0.0,
+        source="TEST",
+        trace_id="trace-load-override",
+    )
+
+    intent = resolver.resolve(
+        extraction,
+        interactive_payload=None,
+        current_workflow="TRUCK_FLOW",
+        message_text="post load delhi to jaipur",
+    )
+
+    assert intent == Intent.CREATE_LOAD
+    assert extraction.data["lane_key"] == "delhi:jaipur"
+    assert extraction.data["corridor_detected"] is True
+
+
+def test_explicit_truck_intent_overrides_load_flow_corridor_anchor():
+    resolver = IntentResolver()
+    extraction = ExtractionResult(
+        intent=Intent.UNKNOWN,
+        data={},
+        confidence=0.0,
+        source="TEST",
+        trace_id="trace-truck-override",
+    )
+
+    intent = resolver.resolve(
+        extraction,
+        interactive_payload=None,
+        current_workflow="LOAD_FLOW",
+        message_text="need truck delhi to jaipur",
+    )
+
+    assert intent == Intent.POST_TRUCK
+    assert extraction.data["lane_key"] == "delhi:jaipur"
+    assert extraction.data["corridor_detected"] is True
+
+
 def test_intent_resolver_maps_main_menu_buttons():
     resolver = IntentResolver()
     extraction = ExtractionResult(
@@ -351,6 +422,160 @@ def test_dispatcher_confirm_truck_surfaces_matching_summary():
 
     assert "Found 1 matching load(s):" in response.text
     assert "1. Mumbai → Delhi | 5000 kg | 91% match" in response.text
+
+
+def test_dispatcher_skips_route_questions_for_high_confidence_load_lane():
+    dispatcher = DispatcherService(MagicMock(), user_id="user-123")
+    payload = SimpleNamespace(
+        data={
+            "from_city": "delhi",
+            "to_city": "jaipur",
+            "confidence_source": "corridor_detection",
+            "corridor_source": "alias_pair",
+        }
+    )
+
+    response = dispatcher.execute(Intent.CREATE_LOAD, payload=payload)
+
+    assert response.text == "Please share the load weight."
+
+
+def test_route_confidence_class_high_city_pair():
+    dispatcher = DispatcherService(MagicMock(), user_id="user-123")
+
+    assert dispatcher._route_confidence_class(
+        {
+            "confidence_source": "corridor_detection",
+            "corridor_source": "city_pair",
+        }
+    ) == RouteConfidence.HIGH
+
+
+def test_route_confidence_class_high_alias_pair():
+    dispatcher = DispatcherService(MagicMock(), user_id="user-123")
+
+    assert dispatcher._route_confidence_class(
+        {
+            "confidence_source": "corridor_detection",
+            "corridor_source": "alias_pair",
+        }
+    ) == RouteConfidence.HIGH
+
+
+def test_route_confidence_class_medium_adjacent_pair():
+    dispatcher = DispatcherService(MagicMock(), user_id="user-123")
+
+    assert dispatcher._route_confidence_class(
+        {
+            "confidence_source": "corridor_detection",
+            "corridor_source": "adjacent_city_pair",
+        }
+    ) == RouteConfidence.MEDIUM
+
+
+def test_route_confidence_class_medium_llm_structured():
+    dispatcher = DispatcherService(MagicMock(), user_id="user-123")
+
+    assert dispatcher._route_confidence_class(
+        {
+            "confidence_source": "llm_structured",
+        }
+    ) == RouteConfidence.MEDIUM
+
+
+def test_route_confidence_class_low_regex():
+    dispatcher = DispatcherService(MagicMock(), user_id="user-123")
+
+    assert dispatcher._route_confidence_class(
+        {
+            "confidence_source": "regex",
+        }
+    ) == RouteConfidence.LOW
+
+
+def test_route_confidence_class_missing_confidence_source_warns_and_falls_back_low():
+    dispatcher = DispatcherService(MagicMock(), user_id="user-123")
+
+    with patch("app.services.dispatcher_service.logger.warning") as mock_warning:
+        confidence = dispatcher._route_confidence_class(
+            {
+                "lane_key": "delhi:jaipur",
+                "directional_lane_key": "delhi->jaipur",
+            }
+        )
+
+    assert confidence == RouteConfidence.LOW
+    mock_warning.assert_called_once()
+
+
+def test_dispatcher_confirms_adjacent_load_route_once_before_next_slot():
+    dispatcher = DispatcherService(MagicMock(), user_id="user-123", phone="919999999999")
+    payload = SimpleNamespace(
+        data={
+            "from_city": "delhi",
+            "to_city": "jaipur",
+            "confidence_source": "corridor_detection",
+            "corridor_source": "adjacent_city_pair",
+        }
+    )
+
+    with patch("app.services.dispatcher_service.get_session_data", return_value={}), \
+         patch("app.services.dispatcher_service.set_session_data") as mock_set_session_data:
+        response = dispatcher.execute(Intent.CREATE_LOAD, payload=payload)
+
+    assert "Just confirming the route: Delhi → Jaipur." in response.text
+    assert "please share the load weight." in response.text.lower()
+    mock_set_session_data.assert_called_once_with(
+        dispatcher.db,
+        "919999999999",
+        "user-123",
+        {"route_confirmation_prompted_for": "delhi->jaipur"},
+    )
+
+
+def test_dispatcher_does_not_repeat_route_confirmation_after_prompting_once():
+    dispatcher = DispatcherService(MagicMock(), user_id="user-123", phone="919999999999")
+    payload = SimpleNamespace(
+        data={
+            "from_city": "delhi",
+            "to_city": "jaipur",
+            "confidence_source": "corridor_detection",
+            "corridor_source": "adjacent_city_pair",
+        }
+    )
+
+    with patch(
+        "app.services.dispatcher_service.get_session_data",
+        return_value={"route_confirmation_prompted_for": "delhi->jaipur"},
+    ), patch("app.services.dispatcher_service.set_session_data") as mock_set_session_data:
+        response = dispatcher.execute(Intent.CREATE_LOAD, payload=payload)
+
+    assert response.text == "Please share the load weight."
+    mock_set_session_data.assert_not_called()
+
+
+def test_dispatcher_confirms_llm_structured_truck_route_before_capacity():
+    dispatcher = DispatcherService(MagicMock(), user_id="user-123", phone="919999999999")
+    payload = SimpleNamespace(
+        data={
+            "current_city": "bangalore",
+            "to_city": "delhi",
+            "confidence_source": "llm_structured",
+        }
+    )
+
+    with patch("app.services.dispatcher_service.get_session_data", return_value={}), \
+         patch("app.services.dispatcher_service.set_session_data") as mock_set_session_data:
+        response = dispatcher.execute(Intent.POST_TRUCK, payload=payload)
+
+    assert "Just confirming the route: Bangalore → Delhi." in response.text
+    assert "please share the truck capacity." in response.text.lower()
+    mock_set_session_data.assert_called_once_with(
+        dispatcher.db,
+        "919999999999",
+        "user-123",
+        {"route_confirmation_prompted_for": "bangalore->delhi"},
+    )
 
 
 def test_dispatcher_upload_kyc_prompt_is_actionable():
@@ -624,3 +849,189 @@ def test_replay_record_passes_workflow_and_phone_to_dispatcher():
         "workflow": "LOAD_FLOW",
         "phone": "919999999999",
     }
+
+
+def test_replay_record_prefers_preserved_extraction_data_for_reconstruction():
+    captured = {}
+    record = SimpleNamespace(
+        id="pm-2",
+        idempotency_key="user-123:CONFIRM:wamid.2:LOAD_FLOW",
+        trace_id="trace-2",
+        request_payload={
+            "intent": "CONFIRM",
+            "payload": {"from_city": "delhi", "to_city": "jaipur"},
+            "extraction_data": {
+                "from_city": "delhi",
+                "to_city": "jaipur",
+                "weight_kg": 5000,
+                "lane_key": "delhi:jaipur",
+                "directional_lane_key": "delhi->jaipur",
+                "resolver_version": RESOLVER_VERSION,
+            },
+            "phone": "919999999999",
+            "current_workflow": "LOAD_FLOW",
+        },
+        status="EXECUTING",
+        retry_count=0,
+        execution_owner=None,
+        error_log=None,
+        response_payload=None,
+    )
+
+    def fake_execute(self, intent, payload, current_workflow=None):
+        captured["intent"] = getattr(intent, "value", str(intent))
+        captured["payload_type"] = type(payload).__name__
+        captured["workflow"] = current_workflow
+        captured["phone"] = self.phone
+        captured["lane_key"] = payload.data.get("lane_key")
+        captured["resolver_version"] = payload.data.get("resolver_version")
+        captured["weight_kg"] = payload.data.get("weight_kg")
+        return Response(text="ok")
+
+    async def run():
+        daemon = RecoveryDaemon(lambda: None)
+        with patch("app.services.dispatcher_service.DispatcherService.execute", fake_execute):
+            await daemon._replay_record(_FakeDB(), record)
+
+    asyncio.run(run())
+
+    assert captured == {
+        "intent": "CONFIRM",
+        "payload_type": "GenericActionPayload",
+        "workflow": "LOAD_FLOW",
+        "phone": "919999999999",
+        "lane_key": "delhi:jaipur",
+        "resolver_version": RESOLVER_VERSION,
+        "weight_kg": 5000,
+    }
+
+
+def test_fetch_cached_intent_data_ignores_inflight_records():
+    service = IdempotencyService(db=None)
+    service.find_record = MagicMock(return_value=SimpleNamespace(
+        status="IN_PROGRESS",
+        intent="CREATE_LOAD",
+        request_payload={"extraction_data": {"lane_key": "delhi:jaipur"}},
+    ))
+
+    assert service.fetch_cached_intent_data("wamid.1") is None
+
+
+def test_fetch_cached_intent_data_uses_success_records_only():
+    service = IdempotencyService(db=None)
+    service.find_record = MagicMock(return_value=SimpleNamespace(
+        status="SUCCESS",
+        intent="CREATE_LOAD",
+        request_payload={"extraction_data": {"lane_key": "delhi:jaipur"}},
+    ))
+
+    assert service.fetch_cached_intent_data("wamid.1") == (
+        Intent.CREATE_LOAD,
+        {"lane_key": "delhi:jaipur"},
+    )
+
+
+def test_replay_lane_key_stability():
+    resolver = IntentResolver()
+    extraction = ExtractionResult(
+        intent=Intent.UNKNOWN,
+        data={},
+        confidence=0.0,
+        source="TEST",
+        trace_id="trace-lane-key",
+    )
+    resolver.resolve(
+        extraction,
+        interactive_payload=None,
+        current_workflow="IDLE",
+        message_text="blr to delhi",
+    )
+
+    stored_lane_key = extraction.data["lane_key"]
+    captured = {}
+    record = SimpleNamespace(
+        id="pm-3",
+        idempotency_key="user-123:CONFIRM:wamid.3:LOAD_FLOW",
+        trace_id="trace-3",
+        request_payload={
+            "intent": "CONFIRM",
+            "payload": {"from_city": "bangalore", "to_city": "delhi"},
+            "extraction_data": dict(extraction.data),
+            "phone": "919999999999",
+            "current_workflow": "LOAD_FLOW",
+        },
+        status="EXECUTING",
+        retry_count=0,
+        execution_owner=None,
+        error_log=None,
+        response_payload=None,
+    )
+
+    def fake_execute(self, intent, payload, current_workflow=None):
+        captured["lane_key"] = payload.data.get("lane_key")
+        captured["from_city"] = payload.data.get("from_city")
+        captured["resolver_version"] = payload.data.get("resolver_version")
+        return Response(text="ok")
+
+    async def run():
+        daemon = RecoveryDaemon(lambda: None)
+        with patch("app.services.dispatcher_service.DispatcherService.execute", fake_execute):
+            await daemon._replay_record(_FakeDB(), record)
+
+    asyncio.run(run())
+
+    assert stored_lane_key == "bangalore:delhi"
+    assert captured == {
+        "lane_key": stored_lane_key,
+        "from_city": "bangalore",
+        "resolver_version": RESOLVER_VERSION,
+    }
+    # User refinement: verify directional equality in replay
+    assert record.request_payload["extraction_data"]["directional_lane_key"] == "bangalore->delhi"
+
+def test_route_confidence_enum_enforcement():
+    """Ensures RouteConfidence remains a strict enum and is correctly classed."""
+    from app.contracts.route_confidence import RouteConfidence
+    assert isinstance(RouteConfidence.HIGH, RouteConfidence)
+    assert RouteConfidence.HIGH.value == "HIGH"
+
+
+def test_phase2_suppresses_secondary_response_for_inflight_duplicate():
+    db = MagicMock()
+    locked_user = SimpleNamespace(id="user-123", state="LOAD_FLOW", updated_at=None)
+    transition = SimpleNamespace(allowed=True, next_state="LOAD_FLOW", error_message=None)
+    idempotency = MagicMock()
+    idempotency.start.return_value = None
+    idempotency.fetch_cached_response.return_value = None
+    state_machine = MagicMock()
+    state_machine.transition.return_value = transition
+    extraction = ExtractionResult(
+        intent=Intent.CREATE_LOAD,
+        data={"from_city": "delhi", "to_city": "jaipur"},
+        confidence=1.0,
+        source="TEST",
+        trace_id="trace-dup",
+    )
+
+    async def run():
+        with patch("app.routers.webhook._lock_user_for_dispatch", return_value=locked_user), \
+             patch("app.routers.webhook.get_or_create_session", return_value=None), \
+             patch("app.routers.webhook.set_session_data", return_value=None), \
+             patch("app.routers.webhook.update_session", return_value=None):
+            return await _phase2_atomic_dispatch(
+                phone="919999999999",
+                wa_id="wamid.dup",
+                db=db,
+                trace_id="trace-dup",
+                intent=Intent.CREATE_LOAD,
+                payload={"from_city": "delhi", "to_city": "jaipur"},
+                extraction=extraction,
+                idempotency=idempotency,
+                state_machine=state_machine,
+            )
+
+    response, idem_key, msg_id = asyncio.run(run())
+
+    assert response is None
+    assert idem_key == "user-123:CREATE_LOAD:wamid.dup:LOAD_FLOW"
+    assert msg_id is None

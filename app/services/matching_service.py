@@ -64,7 +64,7 @@ def score_match(load: LoadRequest, listing: TruckSpaceListing, owner: User) -> i
         score += 20
     
     # Industrial Corridor Bonus (Reusing logistics_data)
-    score += corridor_bonus(req_pickup, req_drop)
+    score += corridor_bonus(load.from_city, load.to_city)
         
     # 2. Date Score (Max 20)
     if load.pickup_date and listing.departure_date:

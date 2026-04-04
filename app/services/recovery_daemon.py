@@ -156,7 +156,6 @@ class RecoveryDaemon:
 
             req = record.request_payload
             intent_val = req.get("intent")
-            payload_data = req.get("payload")
             phone = req.get("phone")
             current_workflow = req.get("current_workflow")
 
@@ -166,7 +165,8 @@ class RecoveryDaemon:
 
             intent = Intent(intent_val)
             factory = PayloadFactory()
-            reconstructed_payload = factory.build(intent, payload_data)
+            replay_data = factory.extract_replay_data(req)
+            reconstructed_payload = factory.build(intent, replay_data)
 
             dispatcher = DispatcherService(db, parts[0], phone=phone)
             response = dispatcher.execute(

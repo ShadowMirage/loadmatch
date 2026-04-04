@@ -2,7 +2,7 @@ import pytest
 from app.contracts.enums import Intent
 from app.services.intent_resolver import IntentResolver
 from app.services.extraction_engine import ExtractionResult
-from app.services.logistics_data import CorridorSource, LaneClass
+from app.services.logistics_data import CorridorSource, LaneClass, RESOLVER_VERSION
 
 @pytest.fixture
 def resolver():
@@ -18,7 +18,7 @@ def test_v3_metadata_structure(resolver):
     assert extraction.data["corridor_detected"] is True
     assert extraction.data["corridor_source"] == CorridorSource.CITY_PAIR
     assert extraction.data["confidence_source"] == "corridor_detection"
-    assert extraction.data["resolver_version"] == "v3_corridor_payload_acceleration"
+    assert extraction.data["resolver_version"] == RESOLVER_VERSION
     assert extraction.data["lane_detected_via"] == "separator_window"
 
 def test_lane_key_symmetry_reverse_order(resolver):
@@ -77,6 +77,13 @@ def test_adjacency_metadata(resolver):
     
     assert extr.data["corridor_source"] == CorridorSource.ADJACENT_CITY_PAIR
     assert extr.data["lane_detected_via"] == "adjacent_tokens"
+
+def test_truck_intent_regression(resolver):
+    # Case 6b: Adjacency with explicit truck keyword
+    extr = ExtractionResult(intent=Intent.UNKNOWN, data={}, confidence=0.0, source="TEST", trace_id="t1")
+    intent = resolver.resolve(extr, None, "IDLE", message_text="need truck delhi jaipur")
+    assert intent == Intent.POST_TRUCK
+    assert extr.data["corridor_detected"] is True
 
 def test_truck_heuristic_boost(resolver):
     # Case 7: Basic keyword signals (non-corridor)

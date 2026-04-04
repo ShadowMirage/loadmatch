@@ -2,7 +2,7 @@ from datetime import date, timedelta
 from types import SimpleNamespace
 
 from app.models.enums import KycFlowState
-from app.services.matching_service import score_match
+from app.services.matching_service import corridor_bonus, score_match
 from app.services.route_corridors import get_corridor, get_nearby_routes, is_in_corridor
 
 
@@ -80,3 +80,10 @@ def test_corridor_lookup_and_membership_use_canonical_city_forms():
 
 def test_nearby_routes_return_display_ready_route_labels():
     assert ("Jaipur", "Delhi") in get_nearby_routes("Bhiwadi", "Delhi")
+
+
+def test_corridor_bonus_preserves_alias_and_industrial_zone_provenance():
+    assert corridor_bonus("ankleshwar gidc", "vapi") == 12
+    assert corridor_bonus("ncr", "jaipur") == 8
+    # Alias collapse survives scoring logic
+    assert corridor_bonus("baroda", "surat") == corridor_bonus("vadodara", "surat")

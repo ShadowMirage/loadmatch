@@ -253,16 +253,19 @@ async def _phase2_atomic_dispatch(
         # Construct idempotency key (stable across replays)
         idem_key = f"{locked_user.id}:{intent.value}:{wa_id}:{transition.next_state}"
 
-        # Safe payload serialization for ledger
+        # Persist both the dispatcher payload and the full normalized extraction
+        # context so replay can rebuild typed payloads without losing routing metadata.
         try:
-            payload_dict = dataclasses.asdict(payload) if hasattr(payload, "__dataclass_fields__") else payload
+            payload_dict = PayloadFactory.serialize(payload)
         except Exception:
             payload_dict = {"action": str(intent.value), "data": str(payload)}
         payload_dict = _json_safe(payload_dict)
+        extraction_data = _json_safe(extraction.data or {})
 
         request_payload = {
             "intent": intent.value,
             "payload": payload_dict,
+            "extraction_data": extraction_data,
             "phone": phone,
             "wa_id": wa_id,
             "current_workflow": current_db_state,
@@ -306,7 +309,8 @@ async def _phase2_atomic_dispatch(
             if cached_resp:
                 response = ContractResponse(**cached_resp)
             else:
-                response = ContractResponse(text="Processing your request...")
+                logger.info(f"Duplicate in-flight message detected for {wa_id}; suppressing secondary response.")
+                response = None
 
     # 4. Universal Session Persistence (Correction Safety)
     # We save session data even if dispatch was skipped/denied to preserve conversational context.
