@@ -3,7 +3,7 @@ import pytest
 from unittest.mock import MagicMock, patch
 from app.contracts.enums import Intent
 from app.services.extraction_engine import ExtractionResult
-from app.routers.webhook import _phase2_atomic_dispatch
+from app.routers.webhook import _phase2_atomic_dispatch, _process_message
 from app.contracts.responses import Response
 
 class _FakeDB:
@@ -18,7 +18,7 @@ class _FakeDB:
     def flush(self):
         pass
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_simulate_webhook_burst_suppression():
     """Phase 6: Duplicate delivery suppression (Burst simulation)"""
     db = MagicMock()
@@ -65,7 +65,7 @@ async def test_simulate_webhook_burst_suppression():
     # Since we mocked idempotency.start to return None for all, all should be None.
     assert all(r is None for r in responses)
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_success_only_replay_reuse():
     """Phase 7: SUCCESS-only replay reuse"""
     from app.services.idempotency_service import IdempotencyService
@@ -85,3 +85,28 @@ async def test_success_only_replay_reuse():
     assert cached is not None
     assert cached[0] == Intent.CREATE_LOAD
     assert cached[1]["lane"] == "A"
+
+
+@pytest.mark.anyio
+async def test_recovery_then_retry_same_wamid_no_second_dispatch():
+    db = MagicMock()
+    msg = {
+        "from": "919999999999",
+        "id": "wamid.recovery.retry",
+        "type": "text",
+        "text": {"body": "delhi to jaipur"},
+    }
+    idempotency = MagicMock()
+    idempotency.exists.return_value = True
+    idempotency.find_record.return_value = MagicMock(status="SUCCESS", delivery_state="DELIVERED")
+
+    with patch("app.routers.webhook.IdempotencyService", return_value=idempotency), \
+         patch("app.routers.webhook._get_or_create_user") as mock_get_or_create_user, \
+         patch("app.routers.webhook._phase1_resolve_intent") as mock_phase1, \
+         patch("app.routers.webhook._phase2_atomic_dispatch") as mock_phase2:
+        await _process_message(msg, db)
+
+    idempotency.exists.assert_called_once_with("wamid.recovery.retry")
+    mock_get_or_create_user.assert_not_called()
+    mock_phase1.assert_not_called()
+    mock_phase2.assert_not_called()

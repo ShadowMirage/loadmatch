@@ -22,7 +22,11 @@ class PayloadFactory:
     @staticmethod
     def serialize(payload: Any) -> Any:
         if dataclasses.is_dataclass(payload):
-            return dataclasses.asdict(payload)
+            serialized = dataclasses.asdict(payload)
+            extraction_data = getattr(payload, "extraction_data", None)
+            if isinstance(extraction_data, dict):
+                serialized["extraction_data"] = extraction_data
+            return serialized
         return payload
 
     @staticmethod
@@ -69,9 +73,13 @@ class PayloadFactory:
             # 🔒 STRICT FILTERING: Only pass fields that exist in the dataclass
             valid_fields = {f.name for f in dataclasses.fields(payload_class)}
             filtered_data = {k: v for k, v in normalized_data.items() if k in valid_fields}
-            
+
             # This triggers __post_init__ validation automatically
-            return payload_class(**filtered_data)
+            payload = payload_class(**filtered_data)
+            # Preserve replay/corridor provenance on typed payloads so dispatcher
+            # pacing and replay equivalence do not depend on GenericActionPayload.
+            setattr(payload, "extraction_data", dict(normalized_data))
+            return payload
         except TypeError as e:
             logger.info(f"Payload still partial for {intent}: {e}")
             return GenericActionPayload(action=intent.value, data=normalized_data)

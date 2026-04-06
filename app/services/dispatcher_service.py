@@ -20,8 +20,13 @@ from app.models.truck import Truck
 from app.models.user import User
 from app.models.enums import LoadRequestStatus, ListingStatus, TruckType
 from app.services.logistics_data import normalize_hub_name
-from app.services.matching_service import find_matches_for_load_summary, find_matches_for_truck_summary
+from app.services.matching_service import (
+    find_matches_for_load_summary,
+    find_matches_for_truck_summary,
+    find_recent_duplicate_listing,
+)
 from app.services.session_manager import clear_session, get_session_data, set_session_data
+from app.services.state_machine_service import StateMachineService
 
 logger = logging.getLogger(__name__)
 
@@ -71,8 +76,8 @@ class DispatcherService:
             return self._handle_contact_driver(payload)
         if intent == Intent.CONFIRM_BOOKING:
             return self._handle_confirm_booking(payload)
-        if intent == Intent.UNKNOWN and current_workflow in (None, "IDLE"):
-            return self._main_menu_response("Please select an option:")
+        if intent == Intent.UNKNOWN and not StateMachineService.workflow_is_active(current_workflow):
+            return self._main_menu_response("I didn't catch that. Please select an option:")
 
         if intent in INTERRUPT_INTENTS:
             return self._handle_menu_interrupt(current_workflow)
@@ -193,6 +198,22 @@ class DispatcherService:
             capacity_kg = int(data.get("capacity_kg") or 0)
             registration_number = (data.get("plate") or f"TRK{str(self.user_id).replace('-', '')[:8]}").upper()
             truck_type = self._coerce_truck_type(data.get("truck_type"))
+            from_city = self._city_label(data.get("current_city") or data.get("from_city"))
+            to_city = self._city_label(data.get("to_city"))
+
+            duplicate_listing = find_recent_duplicate_listing(
+                self.db,
+                self.user_id,
+                from_city,
+                to_city,
+            )
+            if duplicate_listing:
+                return ContractResponse(
+                    text=(
+                        "You already posted this route recently.\n"
+                        "Please wait a bit before posting the same lane again."
+                    )
+                )
 
             truck = self.db.query(Truck).filter(Truck.owner_id == self.user_id).first()
             if not truck:
@@ -212,8 +233,8 @@ class DispatcherService:
             listing = TruckSpaceListing(
                 owner_id=self.user_id,
                 truck_id=truck.id,
-                from_city=self._city_label(data.get("current_city") or data.get("from_city")),
-                to_city=self._city_label(data.get("to_city")),
+                from_city=from_city,
+                to_city=to_city,
                 departure_date=self._coerce_date(data.get("departure_date") or data.get("date")),
                 total_capacity_kg=capacity_kg,
                 available_capacity_kg=capacity_kg,
@@ -438,7 +459,11 @@ class DispatcherService:
         elif hasattr(payload, "data") and isinstance(payload.data, dict):
             payload_data = payload.data
         elif dataclasses.is_dataclass(payload):
-            payload_data = dataclasses.asdict(payload)
+            extraction_data = getattr(payload, "extraction_data", None)
+            payload_data = {
+                **(extraction_data if isinstance(extraction_data, dict) else {}),
+                **dataclasses.asdict(payload),
+            }
         else:
             payload_data = {
                 key: value
@@ -466,6 +491,14 @@ class DispatcherService:
         return str(raw_value or "").strip().lower()
 
     def _route_confidence_class(self, data: dict) -> RouteConfidence:
+        if not data.get("resolver_version"):
+            logger.warning(
+                "[MISSING_RESOLVER_VERSION]",
+                extra={
+                    "lane_key": data.get("lane_key"),
+                    "directional_lane_key": data.get("directional_lane_key"),
+                },
+            )
         confidence_source = self._normalized_metadata_value(data.get("confidence_source"))
         corridor_source = self._normalized_metadata_value(data.get("corridor_source"))
 
@@ -701,12 +734,10 @@ class DispatcherService:
         return "\n".join(lines)
 
     def _is_confirmation_step(self, workflow: Optional[str]) -> bool:
-        if not workflow:
-            return False
-        return workflow.endswith("_CONFIRM")
+        return StateMachineService.workflow_is_confirm_stage(workflow)
 
     def _handle_menu_interrupt(self, workflow: Optional[str]) -> ContractResponse:
-        if workflow and workflow != "IDLE" and not self._is_confirmation_step(workflow):
+        if StateMachineService.workflow_is_active(workflow) and not self._is_confirmation_step(workflow):
             return ContractResponse(
                 text=(
                     "You're currently in a workflow.\n\n"
@@ -716,7 +747,7 @@ class DispatcherService:
                 )
             )
         
-        if workflow and self._is_confirmation_step(workflow):
+        if self._is_confirmation_step(workflow):
             return ContractResponse(
                 text="You are confirming an action.\n\nReply:\n1️⃣ Continue\n2️⃣ Cancel"
             )

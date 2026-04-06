@@ -505,7 +505,9 @@ def test_route_confidence_class_missing_confidence_source_warns_and_falls_back_l
         )
 
     assert confidence == RouteConfidence.LOW
-    mock_warning.assert_called_once()
+    warning_messages = [call.args[0] for call in mock_warning.call_args_list]
+    assert "[MISSING_RESOLVER_VERSION]" in warning_messages
+    assert "Dispatcher pacing fallback: extraction_data missing confidence_source" in warning_messages
 
 
 def test_dispatcher_confirms_adjacent_load_route_once_before_next_slot():
@@ -996,6 +998,78 @@ def test_route_confidence_enum_enforcement():
     assert RouteConfidence.HIGH.value == "HIGH"
 
 
+def test_workflow_taxonomy_helpers_are_stable():
+    assert StateMachineService.workflow_is_active(None) is False
+    assert StateMachineService.workflow_is_active("") is False
+    assert StateMachineService.workflow_is_active("LOAD_FLOW") is True
+    assert StateMachineService.workflow_is_active("LOAD_CONFIRM") is True
+    assert StateMachineService.workflow_is_confirm_stage("LOAD_CONFIRM") is True
+    assert StateMachineService.workflow_is_confirm_stage("LOAD_FLOW") is False
+    assert StateMachineService.workflow_is_confirm_stage(None) is False
+    assert StateMachineService.workflow_is_terminal("SUCCESS") is True
+    assert StateMachineService.workflow_is_terminal("CANCELLED") is True
+    assert StateMachineService.workflow_is_terminal("FAILED") is True
+    assert StateMachineService.workflow_is_terminal("IDLE") is False
+    assert StateMachineService.workflow_is_terminal("TRUCK_FLOW") is False
+
+
+def test_active_workflow_requires_complete_session_data():
+    session_store = {
+        "lane_key": None,
+        "directional_lane_key": None,
+        "from_city": None,
+        "to_city": None,
+    }
+
+    workflow = StateMachineService.reconstruct_workflow("LOAD_FLOW", session_store)
+
+    assert workflow is None
+
+
+def test_slot_only_reconstruction_does_not_resume_workflow():
+    session_store = {
+        "weight": "7 ton",
+        "date": "tomorrow",
+        "lane_key": None,
+        "directional_lane_key": None,
+        "from_city": None,
+        "to_city": None,
+    }
+
+    workflow = StateMachineService.reconstruct_workflow("LOAD_FLOW", session_store)
+
+    assert workflow is None
+
+
+def test_slot_only_reconstruction_emits_abort_marker(caplog):
+    session_store = {
+        "weight": "7 ton",
+        "date": "tomorrow",
+    }
+
+    StateMachineService.reconstruct_workflow("LOAD_FLOW", session_store)
+
+    assert any(
+        "[SESSION_RECONSTRUCTION_ABORT]" in record.message
+        for record in caplog.records
+    )
+
+
+def test_terminal_cleanup_clears_provenance_metadata():
+    session_store = {
+        "lane_key": "delhi:jaipur",
+        "directional_lane_key": "delhi->jaipur",
+        "confidence_source": "corridor_detection",
+        "corridor_source": "city_pair",
+        "resolver_version": "v3",
+    }
+
+    cleaned = StateMachineService.cleanup_terminal_state(session_store)
+
+    assert cleaned == {}
+    assert session_store == {}
+
+
 def test_phase2_suppresses_secondary_response_for_inflight_duplicate():
     db = MagicMock()
     locked_user = SimpleNamespace(id="user-123", state="LOAD_FLOW", updated_at=None)
@@ -1035,3 +1109,231 @@ def test_phase2_suppresses_secondary_response_for_inflight_duplicate():
     assert response is None
     assert idem_key == "user-123:CREATE_LOAD:wamid.dup:LOAD_FLOW"
     assert msg_id is None
+
+
+def test_phase2_clears_session_context_when_cancel_returns_to_idle():
+    db = MagicMock()
+    locked_user = SimpleNamespace(id="user-123", state="TRUCK_FLOW", updated_at=None)
+    transition = SimpleNamespace(allowed=True, next_state="IDLE", error_message=None)
+    idempotency = MagicMock()
+    idempotency.start.return_value = SimpleNamespace(id="pm-cancel")
+    state_machine = MagicMock()
+    state_machine.transition.return_value = transition
+    extraction = ExtractionResult(
+        intent=Intent.CANCEL,
+        data={
+            "current_city": "jaipur",
+            "to_city": "gwalior",
+            "capacity_kg": 7000,
+        },
+        confidence=1.0,
+        source="TEST",
+        trace_id="trace-cancel",
+    )
+
+    async def run():
+        with patch("app.routers.webhook._lock_user_for_dispatch", return_value=locked_user), \
+             patch("app.routers.webhook.clear_session") as mock_clear_session, \
+             patch("app.routers.webhook.get_or_create_session") as mock_get_or_create_session, \
+             patch("app.routers.webhook.set_session_data") as mock_set_session_data, \
+             patch("app.routers.webhook.update_session") as mock_update_session:
+            response, _, _ = await _phase2_atomic_dispatch(
+                phone="919999999999",
+                wa_id="wamid.cancel",
+                db=db,
+                trace_id="trace-cancel",
+                intent=Intent.CANCEL,
+                payload={"action": "CANCEL"},
+                extraction=extraction,
+                idempotency=idempotency,
+                state_machine=state_machine,
+            )
+            return response, mock_clear_session, mock_get_or_create_session, mock_set_session_data, mock_update_session
+
+    response, mock_clear_session, mock_get_or_create_session, mock_set_session_data, mock_update_session = asyncio.run(run())
+
+    assert "cancelled" in response.text.lower()
+    mock_clear_session.assert_called_once_with(db, "919999999999")
+    mock_get_or_create_session.assert_not_called()
+    mock_set_session_data.assert_not_called()
+    mock_update_session.assert_not_called()
+
+
+def test_phase2_clears_session_context_when_confirm_returns_to_idle():
+    db = MagicMock()
+    locked_user = SimpleNamespace(id="user-123", state="LOAD_FLOW", updated_at=None)
+    transition = SimpleNamespace(allowed=True, next_state="IDLE", error_message=None)
+    idempotency = MagicMock()
+    idempotency.start.return_value = SimpleNamespace(id="pm-confirm")
+    state_machine = MagicMock()
+    state_machine.transition.return_value = transition
+    extraction = ExtractionResult(
+        intent=Intent.CONFIRM,
+        data={
+            "from_city": "jaipur",
+            "to_city": "gwalior",
+            "weight_kg": 7000,
+        },
+        confidence=1.0,
+        source="TEST",
+        trace_id="trace-confirm",
+    )
+
+    async def run():
+        with patch("app.routers.webhook._lock_user_for_dispatch", return_value=locked_user), \
+             patch("app.routers.webhook.clear_session") as mock_clear_session, \
+             patch("app.routers.webhook.set_session_data") as mock_set_session_data, \
+             patch("app.routers.webhook.DispatcherService.execute", return_value=Response(text="Load Created")):
+            response, _, _ = await _phase2_atomic_dispatch(
+                phone="919999999999",
+                wa_id="wamid.confirm",
+                db=db,
+                trace_id="trace-confirm",
+                intent=Intent.CONFIRM,
+                payload={"action": "CONFIRM"},
+                extraction=extraction,
+                idempotency=idempotency,
+                state_machine=state_machine,
+            )
+            return response, mock_clear_session, mock_set_session_data
+
+    response, mock_clear_session, mock_set_session_data = asyncio.run(run())
+
+    assert response.text == "Load Created"
+    mock_clear_session.assert_called_once_with(db, "919999999999")
+    mock_set_session_data.assert_not_called()
+
+
+def test_phase2_warns_when_inactive_workflow_retains_lane_key():
+    db = MagicMock()
+    locked_user = SimpleNamespace(id="user-123", state="TRUCK_FLOW", updated_at=None)
+    transition = SimpleNamespace(allowed=True, next_state="IDLE", error_message=None)
+    idempotency = MagicMock()
+    idempotency.start.return_value = SimpleNamespace(id="pm-cancel-warning")
+    state_machine = MagicMock()
+    state_machine.transition.return_value = transition
+    extraction = ExtractionResult(
+        intent=Intent.CANCEL,
+        data={},
+        confidence=1.0,
+        source="TEST",
+        trace_id="trace-cancel-warning",
+    )
+
+    async def run():
+        with patch("app.routers.webhook._lock_user_for_dispatch", return_value=locked_user), \
+             patch("app.routers.webhook.get_session_data", return_value={"current_city": "jaipur", "lane_key": "gwalior:jaipur"}), \
+             patch("app.routers.webhook.clear_session") as mock_clear_session, \
+             patch("app.routers.webhook.logger.warning") as mock_warning, \
+             patch("app.services.state_machine_service.logger.warning") as mock_state_warning:
+            response, _, _ = await _phase2_atomic_dispatch(
+                phone="919999999999",
+                wa_id="wamid.cancel.warning",
+                db=db,
+                trace_id="trace-cancel-warning",
+                intent=Intent.CANCEL,
+                payload={"action": "CANCEL"},
+                extraction=extraction,
+                idempotency=idempotency,
+                state_machine=state_machine,
+            )
+            return response, mock_clear_session, mock_warning, mock_state_warning
+
+    response, mock_clear_session, mock_warning, mock_state_warning = asyncio.run(run())
+
+    assert "cancelled" in response.text.lower()
+    mock_clear_session.assert_called_once_with(db, "919999999999")
+    warning_messages = [call.args[0] for call in mock_warning.call_args_list]
+    assert "Inactive workflow retained provenance metadata in session_data" in warning_messages
+    state_warning_messages = [call.args[0] for call in mock_state_warning.call_args_list]
+    assert "[TERMINAL_METADATA_LEAK]" in state_warning_messages
+
+
+def test_phase2_does_not_warn_for_inactive_workflow_without_lane_key():
+    db = MagicMock()
+    locked_user = SimpleNamespace(id="user-123", state="TRUCK_FLOW", updated_at=None)
+    transition = SimpleNamespace(allowed=True, next_state="IDLE", error_message=None)
+    idempotency = MagicMock()
+    idempotency.start.return_value = SimpleNamespace(id="pm-cancel-no-lane-warning")
+    state_machine = MagicMock()
+    state_machine.transition.return_value = transition
+    extraction = ExtractionResult(
+        intent=Intent.CANCEL,
+        data={},
+        confidence=1.0,
+        source="TEST",
+        trace_id="trace-cancel-no-lane-warning",
+    )
+
+    async def run():
+        with patch("app.routers.webhook._lock_user_for_dispatch", return_value=locked_user), \
+             patch("app.routers.webhook.get_session_data", return_value={"current_city": "jaipur"}), \
+             patch("app.routers.webhook.clear_session") as mock_clear_session, \
+             patch("app.routers.webhook.logger.warning") as mock_warning:
+            response, _, _ = await _phase2_atomic_dispatch(
+                phone="919999999999",
+                wa_id="wamid.cancel.no-lane-warning",
+                db=db,
+                trace_id="trace-cancel-no-lane-warning",
+                intent=Intent.CANCEL,
+                payload={"action": "CANCEL"},
+                extraction=extraction,
+                idempotency=idempotency,
+                state_machine=state_machine,
+            )
+            return response, mock_clear_session, mock_warning
+
+    response, mock_clear_session, mock_warning = asyncio.run(run())
+
+    assert "cancelled" in response.text.lower()
+    mock_clear_session.assert_called_once_with(db, "919999999999")
+    mock_warning.assert_not_called()
+
+
+def test_terminal_workflow_clears_directional_lane_key():
+    db = MagicMock()
+    locked_user = SimpleNamespace(id="user-123", state="LOAD_FLOW", updated_at=None)
+    transition = SimpleNamespace(allowed=True, next_state="IDLE", error_message=None)
+    idempotency = MagicMock()
+    idempotency.start.return_value = SimpleNamespace(id="pm-terminal-directional")
+    state_machine = MagicMock()
+    state_machine.transition.return_value = transition
+    extraction = ExtractionResult(
+        intent=Intent.CANCEL,
+        data={},
+        confidence=1.0,
+        source="TEST",
+        trace_id="trace-terminal-directional",
+    )
+    session_store = {
+        "lane_key": "delhi:jaipur",
+        "directional_lane_key": "delhi->jaipur",
+        "reverse_directional_lane_key": "jaipur->delhi",
+    }
+
+    def fake_get_session_data(_db, _phone, _user_id, create=False):
+        return dict(session_store)
+
+    def fake_clear_session(_db, _phone):
+        session_store.clear()
+
+    async def run():
+        with patch("app.routers.webhook._lock_user_for_dispatch", return_value=locked_user), \
+             patch("app.routers.webhook.get_session_data", side_effect=fake_get_session_data), \
+             patch("app.routers.webhook.clear_session", side_effect=fake_clear_session):
+            return await _phase2_atomic_dispatch(
+                phone="919999999999",
+                wa_id="wamid.terminal-directional",
+                db=db,
+                trace_id="trace-terminal-directional",
+                intent=Intent.CANCEL,
+                payload={"action": "CANCEL"},
+                extraction=extraction,
+                idempotency=idempotency,
+                state_machine=state_machine,
+            )
+
+    response, _, _ = asyncio.run(run())
+
+    assert "cancelled" in response.text.lower()
+    assert session_store == {}

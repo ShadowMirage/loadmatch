@@ -16,6 +16,7 @@ from app.runtime.whatsapp_adapter import verify_token as get_verify_token
 from app.contracts.meta_intents import INTERRUPT_INTENTS
 
 from app.services.session_manager import (
+    clear_session,
     get_or_create_session,
     get_session_data,
     peek_session,
@@ -163,11 +164,18 @@ async def _phase1_resolve_intent(
 
     session = peek_session(db, phone)
     session_data = get_session_data(db, phone, user.id, create=False)
+    session_data = session_data if isinstance(session_data, dict) else {}
     current_workflow = None
-    if session and session.current_workflow:
-        current_workflow = session.current_workflow
-    elif getattr(user, "state", None) not in (None, "IDLE"):
-        current_workflow = user.state
+
+    stored_workflow = getattr(session, "current_workflow", None)
+    if stored_workflow is None:
+        stored_workflow = getattr(user, "state", None)
+
+    reconstructed_workflow = StateMachineService.reconstruct_workflow(stored_workflow, session_data)
+    if reconstructed_workflow:
+        current_workflow = reconstructed_workflow
+    elif stored_workflow:
+        session_data.clear()
 
     extraction = await extraction_engine.extract(raw_text, user, session_data)
     logger.info(f"[EXTRACTION] intent={extraction.intent} fresh_data={extraction.data}")
@@ -312,17 +320,40 @@ async def _phase2_atomic_dispatch(
                 logger.info(f"Duplicate in-flight message detected for {wa_id}; suppressing secondary response.")
                 response = None
 
-    # 4. Universal Session Persistence (Correction Safety)
-    # We save session data even if dispatch was skipped/denied to preserve conversational context.
-    get_or_create_session(db, phone, locked_user.id)
-    set_session_data(db, phone, locked_user.id, extraction.data)
     next_session_workflow = getattr(locked_user, "state", "IDLE")
-    update_session(
-        db,
-        phone,
-        {"current_workflow": None if next_session_workflow == "IDLE" else next_session_workflow},
-        commit=False,
-    )
+    # Preserve slot state only while a workflow remains active. IDLE transitions
+    # must clear the session buffer, otherwise cancel/confirm paths repopulate
+    # stale payload data and the next workflow resumes with old slots.
+    if not StateMachineService.workflow_is_active(next_session_workflow):
+        persisted_session_data = get_session_data(db, phone, locked_user.id, create=False)
+        if persisted_session_data:
+            leaked_fields = {
+                field: persisted_session_data.get(field)
+                for field in StateMachineService.PROVENANCE_FIELDS
+                if persisted_session_data.get(field)
+            }
+            if leaked_fields:
+                logger.warning(
+                    "Inactive workflow retained provenance metadata in session_data",
+                    extra={
+                        "phone": phone,
+                        "workflow": next_session_workflow,
+                        "leaked_fields": sorted(leaked_fields.keys()),
+                    },
+                )
+            StateMachineService.cleanup_terminal_state(persisted_session_data)
+        clear_session(db, phone)
+    else:
+        # 4. Universal Session Persistence (Correction Safety)
+        # We save session data even if dispatch was skipped/denied to preserve conversational context.
+        get_or_create_session(db, phone, locked_user.id)
+        set_session_data(db, phone, locked_user.id, extraction.data)
+        update_session(
+            db,
+            phone,
+            {"current_workflow": next_session_workflow},
+            commit=False,
+        )
 
     # 5. Atomic Commit (Single Source of Truth)
     db.commit()

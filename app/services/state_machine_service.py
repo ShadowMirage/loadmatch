@@ -15,6 +15,29 @@ class TransitionResult:
     error_message: Optional[str] = None
 
 class StateMachineService:
+    ACTIVE_WORKFLOWS = frozenset({
+        "LOAD_FLOW",
+        "TRUCK_FLOW",
+    })
+    TERMINAL_WORKFLOWS = frozenset({
+        "SUCCESS",
+        "CANCELLED",
+        "FAILED",
+    })
+    ROUTING_AUTHORITY_FIELDS = (
+        "lane_key",
+        "directional_lane_key",
+        "from_city",
+        "to_city",
+    )
+    PROVENANCE_FIELDS = (
+        "lane_key",
+        "directional_lane_key",
+        "confidence_source",
+        "corridor_source",
+        "resolver_version",
+    )
+
     # Hierarchical Transition Matrix
     # Format: {CURRENT_STATE: {INTENT: NEXT_STATE}}
     TRANSITIONS = {
@@ -62,6 +85,72 @@ class StateMachineService:
     }
 
     SESSION_TTL = timedelta(minutes=30)
+
+    @classmethod
+    def workflow_is_active(cls, workflow: Optional[str]) -> bool:
+        if not workflow:
+            return False
+        state = cls.STATE_MIGRATIONS.get(workflow, workflow)
+        return state in cls.ACTIVE_WORKFLOWS or str(state).endswith("_CONFIRM")
+
+    @classmethod
+    def workflow_is_confirm_stage(cls, workflow: Optional[str]) -> bool:
+        if not workflow:
+            return False
+        state = cls.STATE_MIGRATIONS.get(workflow, workflow)
+        return str(state).endswith("_CONFIRM")
+
+    @classmethod
+    def workflow_is_terminal(cls, workflow: Optional[str]) -> bool:
+        if not workflow:
+            return False
+        state = cls.STATE_MIGRATIONS.get(workflow, workflow)
+        return state in cls.TERMINAL_WORKFLOWS
+
+    @classmethod
+    def missing_routing_authority_fields(cls, session_data: Optional[dict]) -> list[str]:
+        data = session_data if isinstance(session_data, dict) else {}
+        return [field for field in cls.ROUTING_AUTHORITY_FIELDS if not data.get(field)]
+
+    @classmethod
+    def reconstruct_workflow(cls, workflow: Optional[str], session_data: Optional[dict]) -> Optional[str]:
+        if not workflow:
+            return None
+
+        state = cls.STATE_MIGRATIONS.get(workflow, workflow)
+
+        if cls.workflow_is_terminal(state):
+            logger.warning(
+                "[STALE_WORKFLOW_IGNORED]",
+                extra={"workflow": state},
+            )
+            return None
+
+        if cls.workflow_is_active(state):
+            missing = cls.missing_routing_authority_fields(session_data)
+            if missing:
+                logger.warning(
+                    "[SESSION_RECONSTRUCTION_ABORT]",
+                    extra={
+                        "workflow": state,
+                        "missing": missing,
+                    },
+                )
+                return None
+
+        return state
+
+    @classmethod
+    def cleanup_terminal_state(cls, session_data: Optional[dict]) -> dict:
+        data = session_data if isinstance(session_data, dict) else {}
+        for field in cls.PROVENANCE_FIELDS:
+            if data.get(field):
+                logger.warning(
+                    "[TERMINAL_METADATA_LEAK]",
+                    extra={"field": field},
+                )
+        data.clear()
+        return data
 
     @staticmethod
     def _as_utc(last_updated: Optional[datetime]) -> Optional[datetime]:

@@ -25,7 +25,7 @@ RESOLVER_VERSION = "v3_integrity_cleanup"
 HUB_LAYERS = {
     "tier1": {"delhi", "mumbai", "chennai", "bangalore", "hyderabad", "kolkata", "ahmedabad", "pune", "surat", "jaipur", "lucknow", "indore", "nagpur", "kanpur"},
     "ncr_satellites": {"gurgaon", "manesar", "bhiwadi", "neemrana", "sonipat", "panipat", "faridabad", "ghaziabad", "noida", "greater noida", "meerut", "jhajjar", "rohtak"},
-    "gujarat_spine": {"sanand", "vadodara", "rajkot", "vapi", "ankleshwar", "bharuch", "morbi", "kandla", "mundra", "hazira"},
+    "gujarat_spine": {"sanand", "vadodara", "baroda", "rajkot", "vapi", "ankleshwar", "bharuch", "morbi", "kandla", "mundra", "hazira"},
     "south_triangle": {"sriperumbudur", "hosur", "tiruppur", "salem", "coimbatore", "trichy", "madurai"},
     "punjab_loop": {"ludhiana", "amritsar", "jalandhar", "mohali", "zirakpur", "chandigarh"},
     "east_belt": {"durgapur", "asansol", "howrah", "patna", "ranchi", "raipur"},
@@ -111,6 +111,8 @@ def get_corridor_source(origin_token: str, dest_token: str) -> CorridorSource:
     
     if o_raw in INDUSTRIAL_ZONE_ALIASES or d_raw in INDUSTRIAL_ZONE_ALIASES:
         return CorridorSource.INDUSTRIAL_ZONE_PAIR
+    if o_raw in CITY_LOGISTICS_HUBS and d_raw in CITY_LOGISTICS_HUBS:
+        return CorridorSource.CITY_PAIR
     if o_raw in CITY_ALIASES or d_raw in CITY_ALIASES:
         return CorridorSource.ALIAS_PAIR
     return CorridorSource.CITY_PAIR

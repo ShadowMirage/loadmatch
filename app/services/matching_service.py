@@ -1,6 +1,7 @@
 from datetime import timedelta, datetime, timezone
 from sqlalchemy.orm import Session
 
+from app.marketplace import LISTING_DUPLICATE_WINDOW_SECONDS, LISTING_FRESHNESS_TTL_SECONDS
 from app.models.enums import ListingStatus, LoadRequestStatus, MatchStatus, KycFlowState
 from app.models.listing import TruckSpaceListing
 from app.models.load_request import LoadRequest
@@ -11,6 +12,79 @@ from app.services.route_corridors import is_in_corridor, get_nearby_routes
 from app.services.logistics_data import (
     CITY_LOGISTICS_HUBS, CorridorSource, get_corridor_source, normalize_hub_name
 )
+
+
+def canonical_lane_key(origin: str, destination: str) -> str:
+    normalized_origin = normalize_hub_name(origin or "")
+    normalized_destination = normalize_hub_name(destination or "")
+    if not normalized_origin or not normalized_destination:
+        return ""
+    ordered = sorted([normalized_origin, normalized_destination])
+    return f"{ordered[0]}:{ordered[1]}"
+
+
+def directional_lane_key(origin: str, destination: str) -> str:
+    normalized_origin = normalize_hub_name(origin or "")
+    normalized_destination = normalize_hub_name(destination or "")
+    if not normalized_origin or not normalized_destination:
+        return ""
+    return f"{normalized_origin}->{normalized_destination}"
+
+
+def is_listing_fresh(listing: TruckSpaceListing, *, now: datetime | None = None) -> bool:
+    now = now or datetime.now(timezone.utc)
+    created_at = getattr(listing, "created_at", None)
+    if created_at is None:
+        return True
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone.utc)
+    return created_at >= now - timedelta(seconds=LISTING_FRESHNESS_TTL_SECONDS)
+
+
+def is_load_fresh(load: LoadRequest, *, now: datetime | None = None) -> bool:
+    now = now or datetime.now(timezone.utc)
+    created_at = getattr(load, "created_at", None)
+    if created_at is None:
+        return True
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone.utc)
+    return created_at >= now - timedelta(seconds=LISTING_FRESHNESS_TTL_SECONDS)
+
+
+def find_recent_duplicate_listing(
+    db: Session,
+    owner_id,
+    origin: str,
+    destination: str,
+    *,
+    now: datetime | None = None,
+) -> TruckSpaceListing | None:
+    now = now or datetime.now(timezone.utc)
+    cutoff = now - timedelta(seconds=LISTING_DUPLICATE_WINDOW_SECONDS)
+    target_lane_key = canonical_lane_key(origin, destination)
+    if not target_lane_key:
+        return None
+
+    candidates = (
+        db.query(TruckSpaceListing)
+        .filter(
+            TruckSpaceListing.owner_id == owner_id,
+            TruckSpaceListing.status.in_([ListingStatus.open, ListingStatus.partial]),
+            TruckSpaceListing.created_at >= cutoff,
+        )
+        .all()
+    )
+
+    for listing in candidates:
+        created_at = getattr(listing, "created_at", None)
+        if created_at is not None:
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=timezone.utc)
+            if created_at < cutoff:
+                continue
+        if canonical_lane_key(listing.from_city, listing.to_city) == target_lane_key:
+            return listing
+    return None
 
 
 def _trust_badge(owner: User) -> str:
@@ -172,6 +246,7 @@ def find_matches_for_load(db: Session, load: LoadRequest, commit: bool = False) 
     now = datetime.now(timezone.utc)
     start_date = load.pickup_date - timedelta(days=2)
     end_date   = load.pickup_date + timedelta(days=2)
+    freshness_cutoff = now - timedelta(seconds=LISTING_FRESHNESS_TTL_SECONDS)
 
     candidates = (
         db.query(TruckSpaceListing, User)
@@ -181,6 +256,7 @@ def find_matches_for_load(db: Session, load: LoadRequest, commit: bool = False) 
             TruckSpaceListing.departure_date <= end_date,
             TruckSpaceListing.available_capacity_kg >= load.weight_kg,
             TruckSpaceListing.status.in_([ListingStatus.open, ListingStatus.partial]),
+            TruckSpaceListing.created_at >= freshness_cutoff,
             (TruckSpaceListing.expires_at == None) | (TruckSpaceListing.expires_at > now),
         )
         .all()
@@ -188,6 +264,10 @@ def find_matches_for_load(db: Session, load: LoadRequest, commit: bool = False) 
 
     valid_trucks = []
     for listing, owner in candidates:
+        if not is_listing_fresh(listing, now=now):
+            continue
+        if str(listing.owner_id) == str(load.shipper_id):
+            continue
         if not is_cargo_compatible(load.category, listing.allowed_categories):
             continue
         valid_trucks.append((listing, owner))
@@ -238,6 +318,7 @@ def find_matches_for_truck_summary(db: Session, listing: TruckSpaceListing) -> d
     # Search loads within +/- 2 days of departure
     start_date = listing.departure_date - timedelta(days=2)
     end_date   = listing.departure_date + timedelta(days=2)
+    freshness_cutoff = now - timedelta(seconds=LISTING_FRESHNESS_TTL_SECONDS)
 
     candidates = (
         db.query(LoadRequest, User)
@@ -247,6 +328,7 @@ def find_matches_for_truck_summary(db: Session, listing: TruckSpaceListing) -> d
             LoadRequest.pickup_date <= end_date,
             LoadRequest.weight_kg <= listing.available_capacity_kg,
             LoadRequest.status == LoadRequestStatus.open,
+            LoadRequest.created_at >= freshness_cutoff,
             (LoadRequest.expires_at == None) | (LoadRequest.expires_at > now)
         )
         .all()
@@ -254,6 +336,10 @@ def find_matches_for_truck_summary(db: Session, listing: TruckSpaceListing) -> d
 
     matches = []
     for load, shipper in candidates:
+        if not is_load_fresh(load, now=now):
+            continue
+        if str(load.shipper_id) == str(listing.owner_id):
+            continue
         if not is_in_corridor(load.from_city, load.to_city, listing.from_city, listing.to_city):
             continue
         if not is_cargo_compatible(load.category, listing.allowed_categories):
