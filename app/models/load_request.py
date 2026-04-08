@@ -12,6 +12,8 @@ class LoadRequest(Base):
     shipper_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
     from_city = Column(String(100), nullable=False)
     to_city = Column(String(100), nullable=False)
+    canonical_lane_key = Column(String(255), nullable=True, index=True)
+    vehicle_type = Column(String(32), nullable=True, index=True)
     pickup_date = Column(Date, nullable=False)
     category = Column(SQLEnum(CargoCategory), nullable=True)
     goods_type = Column(String(100), nullable=True)

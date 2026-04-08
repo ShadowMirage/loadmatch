@@ -129,3 +129,32 @@ def test_payload_factory_merge_precedence_contract():
     assert merged["lane_key"] == "bangalore:delhi"
     assert merged["directional_lane_key"] == "bangalore->delhi"
     assert merged["from_city"] == "bangalore"
+
+
+def test_dispatcher_logs_authority_drift_when_session_and_extraction_disagree():
+    extraction_data = {
+        "from_city": "bangalore",
+        "to_city": "delhi",
+        "weight_kg": 7000,
+        "lane_key": "bangalore:delhi",
+        "directional_lane_key": "bangalore->delhi",
+        "confidence_source": "corridor_detection",
+        "corridor_source": "city_pair",
+        "resolver_version": "v-test",
+    }
+    dispatcher = DispatcherService(MagicMock(), user_id="user-123", phone="919999999999")
+    payload = PayloadFactory().build(Intent.CREATE_LOAD, extraction_data)
+
+    with patch(
+        "app.services.dispatcher_service.get_session_data",
+        return_value={
+            "lane_key": "delhi:jaipur",
+            "directional_lane_key": "delhi->jaipur",
+            "from_city": "delhi",
+            "to_city": "jaipur",
+        },
+    ), patch("app.services.dispatcher_service.logger.warning") as mock_warning:
+        dispatcher._collect_payload_data(payload)
+
+    warning_messages = [call.args[0] for call in mock_warning.call_args_list]
+    assert "AUTHORITY_DRIFT_DETECTED" in warning_messages

@@ -2,9 +2,10 @@ import dataclasses
 import logging
 import re
 from typing import Any, Optional
-from datetime import date
+from datetime import date, datetime, timezone
 
 import dateparser
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.contracts.payloads import CreateLoadPayload, PostTruckPayload
@@ -12,6 +13,7 @@ from app.contracts.responses import Response as ContractResponse, Button, Sectio
 from app.contracts.enums import Intent
 from app.contracts.meta_intents import INTERRUPT_INTENTS
 from app.contracts.route_confidence import RouteConfidence
+from app.config import settings
 from app.models.load_request import LoadRequest
 from app.models.listing import TruckSpaceListing
 from app.models.match import Match
@@ -20,15 +22,45 @@ from app.models.truck import Truck
 from app.models.user import User
 from app.models.enums import LoadRequestStatus, ListingStatus, TruckType
 from app.services.logistics_data import normalize_hub_name
+from app.services.load_freshness_service import is_recent_duplicate_load
+from app.services.marketplace_freshness_service import is_recent_duplicate_lane
 from app.services.matching_service import (
+    canonical_lane_key,
     find_matches_for_load_summary,
     find_matches_for_truck_summary,
-    find_recent_duplicate_listing,
 )
+from app.services.event_logger import track_event
 from app.services.session_manager import clear_session, get_session_data, set_session_data
 from app.services.state_machine_service import StateMachineService
 
 logger = logging.getLogger(__name__)
+
+UNIQUE_LANE_OPEN_INDEX_NAME = "unique_user_lane_open"
+UNIQUE_LANE_VEHICLE_OPEN_INDEX_NAME = "unique_user_lane_vehicle_open"
+
+
+def _is_unique_lane_open_violation(error: IntegrityError) -> bool:
+    original = getattr(error, "orig", None)
+    diag = getattr(original, "diag", None)
+    constraint_name = getattr(diag, "constraint_name", None)
+    if constraint_name in {UNIQUE_LANE_OPEN_INDEX_NAME, UNIQUE_LANE_VEHICLE_OPEN_INDEX_NAME}:
+        return True
+
+    message = " ".join(
+        part for part in (str(error), str(original) if original is not None else "") if part
+    ).lower()
+    if UNIQUE_LANE_OPEN_INDEX_NAME in message or UNIQUE_LANE_VEHICLE_OPEN_INDEX_NAME in message:
+        return True
+
+    return (
+        "unique constraint failed" in message
+        and "truck_space_listings.owner_id" in message
+        and "truck_space_listings.canonical_lane_key" in message
+        and (
+            "truck_space_listings.vehicle_type" in message
+            or UNIQUE_LANE_OPEN_INDEX_NAME in message
+        )
+    )
 
 class DispatcherService:
     """
@@ -83,6 +115,12 @@ class DispatcherService:
             return self._handle_menu_interrupt(current_workflow)
 
         return self._handle_menu_interrupt(current_workflow)
+
+    def _track_internal_event(self, event_type: str, data: dict | None = None) -> None:
+        try:
+            track_event(self.db, self.user_id, event_type, data=data or {}, commit=False)
+        except Exception:
+            logger.debug("Failed to write internal event marker %s", event_type, exc_info=True)
 
     def _handle_create_load_prompt(self, payload: CreateLoadPayload) -> ContractResponse:
         """Guide the user through missing slots, then confirm collected data."""
@@ -154,20 +192,64 @@ class DispatcherService:
             if missing_field:
                 return self._ask_for_missing_field("load", missing_field)
 
-            load = LoadRequest(
-                shipper_id=self.user_id,
-                from_city=self._city_label(data.get("from_city")),
-                to_city=self._city_label(data.get("to_city")),
-                weight_kg=int(data.get("weight_kg") or 0),
-                budget_per_kg=self._coerce_float(data.get("budget_per_kg")),
-                goods_type=data.get("cargo") or data.get("material_type") or "General",
-                pickup_date=self._coerce_date(data.get("pickup_date") or data.get("date")),
-                status=LoadRequestStatus.open,
+            from_city = self._city_label(data.get("from_city"))
+            to_city = self._city_label(data.get("to_city"))
+            lane_key = canonical_lane_key(from_city, to_city)
+            vehicle_type = self._coerce_vehicle_type(
+                data.get("vehicle_type") or data.get("truck_type")
             )
-            self.db.add(load)
-            self.db.flush()
+            self._track_internal_event(
+                "LOAD_CONFIRM_ATTEMPTED",
+                {
+                    "shipper_id": str(self.user_id),
+                    "canonical_lane_key": lane_key,
+                    "vehicle_type": vehicle_type,
+                },
+            )
+            ranking_now = self._resolve_ranking_context_time(data)
+            load = is_recent_duplicate_load(
+                self.db,
+                self.user_id,
+                lane_key,
+                vehicle_type,
+                settings.MARKETPLACE_DUPLICATE_WINDOW_MINUTES,
+            )
+            if load is not None:
+                logger.info(
+                    "LOAD_FRESHNESS_WINDOW_BLOCKED",
+                    extra={
+                        "shipper_id": str(self.user_id),
+                        "canonical_lane_key": lane_key,
+                        "vehicle_type": vehicle_type,
+                        "load_id": str(getattr(load, "id", "")),
+                    },
+                )
+                self._track_internal_event(
+                    "LOAD_FRESHNESS_WINDOW_BLOCKED",
+                    {
+                        "shipper_id": str(self.user_id),
+                        "canonical_lane_key": lane_key,
+                        "vehicle_type": vehicle_type,
+                        "load_id": str(getattr(load, "id", "")),
+                    },
+                )
+            else:
+                load = LoadRequest(
+                    shipper_id=self.user_id,
+                    from_city=from_city,
+                    to_city=to_city,
+                    canonical_lane_key=lane_key,
+                    vehicle_type=vehicle_type,
+                    weight_kg=int(data.get("weight_kg") or 0),
+                    budget_per_kg=self._coerce_float(data.get("budget_per_kg")),
+                    goods_type=data.get("cargo") or data.get("material_type") or "General",
+                    pickup_date=self._coerce_date(data.get("pickup_date") or data.get("date")),
+                    status=LoadRequestStatus.open,
+                )
+                self.db.add(load)
+                self.db.flush()
 
-            matching_summary = self._safe_load_matching_summary(load)
+            matching_summary = self._safe_load_matching_summary(load, ranking_now=ranking_now)
             if matching_summary.get("match_count", 0) > 0:
                 load.status = LoadRequestStatus.matched
             
@@ -198,53 +280,110 @@ class DispatcherService:
             capacity_kg = int(data.get("capacity_kg") or 0)
             registration_number = (data.get("plate") or f"TRK{str(self.user_id).replace('-', '')[:8]}").upper()
             truck_type = self._coerce_truck_type(data.get("truck_type"))
+            vehicle_type = str(getattr(truck_type, "value", truck_type) or "").strip().lower()
             from_city = self._city_label(data.get("current_city") or data.get("from_city"))
             to_city = self._city_label(data.get("to_city"))
-
-            duplicate_listing = find_recent_duplicate_listing(
+            lane_key = canonical_lane_key(from_city, to_city)
+            listing = is_recent_duplicate_lane(
                 self.db,
                 self.user_id,
-                from_city,
-                to_city,
+                lane_key,
+                vehicle_type,
+                settings.MARKETPLACE_DUPLICATE_WINDOW_MINUTES,
             )
-            if duplicate_listing:
-                return ContractResponse(
-                    text=(
-                        "You already posted this route recently.\n"
-                        "Please wait a bit before posting the same lane again."
-                    )
+            if listing is not None:
+                logger.info(
+                    "FRESHNESS_WINDOW_BLOCKED",
+                    extra={
+                        "owner_id": str(self.user_id),
+                        "canonical_lane_key": lane_key,
+                        "vehicle_type": vehicle_type,
+                    },
+                )
+                self._track_internal_event(
+                    "LISTING_FRESHNESS_WINDOW_BLOCKED",
+                    {
+                        "owner_id": str(self.user_id),
+                        "canonical_lane_key": lane_key,
+                        "vehicle_type": vehicle_type,
+                        "listing_id": str(getattr(listing, "id", "")),
+                    },
                 )
 
-            truck = self.db.query(Truck).filter(Truck.owner_id == self.user_id).first()
-            if not truck:
-                truck = Truck(
-                    owner_id=self.user_id,
-                    truck_type=truck_type,
-                    total_capacity_kg=capacity_kg or 10000,
-                    registration_number=registration_number,
-                )
-                self.db.add(truck)
-                self.db.flush()
             else:
-                truck.truck_type = truck_type
-                truck.total_capacity_kg = capacity_kg or truck.total_capacity_kg
-                truck.registration_number = registration_number
+                truck = self.db.query(Truck).filter(Truck.owner_id == self.user_id).first()
+                if not truck:
+                    truck = Truck(
+                        owner_id=self.user_id,
+                        truck_type=truck_type,
+                        total_capacity_kg=capacity_kg or 10000,
+                        registration_number=registration_number,
+                    )
+                    self.db.add(truck)
+                    self.db.flush()
+                else:
+                    truck.truck_type = truck_type
+                    truck.total_capacity_kg = capacity_kg or truck.total_capacity_kg
+                    truck.registration_number = registration_number
 
-            listing = TruckSpaceListing(
-                owner_id=self.user_id,
-                truck_id=truck.id,
-                from_city=from_city,
-                to_city=to_city,
-                departure_date=self._coerce_date(data.get("departure_date") or data.get("date")),
-                total_capacity_kg=capacity_kg,
-                available_capacity_kg=capacity_kg,
-                price_per_kg=self._coerce_float(data.get("rate_per_kg"), default=0.0) or 0.0,
-                status=ListingStatus.open,
+                vehicle_type = str(getattr(truck.truck_type, "value", truck.truck_type) or "").strip().lower()
+                if not vehicle_type:
+                    raise ValueError("vehicle_type must be set for listing persistence")
+
+                listing = TruckSpaceListing(
+                    owner_id=self.user_id,
+                    truck_id=truck.id,
+                    from_city=from_city,
+                    to_city=to_city,
+                    canonical_lane_key=lane_key,
+                    vehicle_type=vehicle_type,
+                    departure_date=self._coerce_date(data.get("departure_date") or data.get("date")),
+                    total_capacity_kg=capacity_kg,
+                    available_capacity_kg=capacity_kg,
+                    price_per_kg=self._coerce_float(data.get("rate_per_kg"), default=0.0) or 0.0,
+                    status=ListingStatus.open,
+                )
+                self.db.add(listing)
+                try:
+                    self.db.flush()
+                except IntegrityError as exc:
+                    if not _is_unique_lane_open_violation(exc):
+                        raise
+
+                    self.db.rollback()
+                    logger.info(
+                        "SCHEMA_DUPLICATE_LANE_SUPPRESSED",
+                        extra={
+                            "owner_id": str(self.user_id),
+                            "canonical_lane_key": lane_key,
+                            "vehicle_type": vehicle_type,
+                            "index_name": UNIQUE_LANE_VEHICLE_OPEN_INDEX_NAME,
+                        },
+                    )
+                    listing = self._find_existing_active_lane_listing(lane_key, vehicle_type)
+                    if listing is None:
+                        raise
+                    self._track_internal_event(
+                        "SCHEMA_DUPLICATE_LANE_SUPPRESSED",
+                        {
+                            "owner_id": str(self.user_id),
+                            "canonical_lane_key": lane_key,
+                            "vehicle_type": vehicle_type,
+                            "listing_id": str(getattr(listing, "id", "")),
+                            "index_name": UNIQUE_LANE_VEHICLE_OPEN_INDEX_NAME,
+                        },
+                    )
+
+            self._track_internal_event(
+                "LISTING_CONFIRM_ATTEMPTED",
+                {
+                    "owner_id": str(self.user_id),
+                    "canonical_lane_key": lane_key,
+                    "vehicle_type": vehicle_type,
+                },
             )
-            self.db.add(listing)
-            self.db.flush()
-
-            matching_summary = self._safe_truck_matching_summary(listing)
+            ranking_now = self._resolve_ranking_context_time(data)
+            matching_summary = self._safe_truck_matching_summary(listing, ranking_now=ranking_now)
 
             if self.phone:
                 clear_session(self.db, self.phone)
@@ -261,6 +400,19 @@ class DispatcherService:
         except Exception as e:
             logger.error(f"Failed to confirm truck: {e}")
             return ContractResponse(text="❌ Failed to post truck. Please try again.")
+
+    def _find_existing_active_lane_listing(self, lane_key: str, vehicle_type: str) -> Optional[TruckSpaceListing]:
+        return (
+            self.db.query(TruckSpaceListing)
+            .filter(
+                TruckSpaceListing.owner_id == self.user_id,
+                TruckSpaceListing.canonical_lane_key == lane_key,
+                TruckSpaceListing.vehicle_type == vehicle_type,
+                TruckSpaceListing.status.in_([ListingStatus.open, ListingStatus.partial]),
+            )
+            .order_by(TruckSpaceListing.created_at.desc())
+            .first()
+        )
 
     def _handle_view_loads(self) -> ContractResponse:
         """List active loads for the user."""
@@ -452,12 +604,15 @@ class DispatcherService:
 
     def _collect_payload_data(self, payload: Any) -> dict:
         payload_data = {}
+        extraction_data = None
         if payload is None:
             payload_data = {}
         elif isinstance(payload, dict):
             payload_data = payload.get("data", payload)
+            extraction_data = payload_data if isinstance(payload_data, dict) else None
         elif hasattr(payload, "data") and isinstance(payload.data, dict):
             payload_data = payload.data
+            extraction_data = payload.data
         elif dataclasses.is_dataclass(payload):
             extraction_data = getattr(payload, "extraction_data", None)
             payload_data = {
@@ -470,6 +625,8 @@ class DispatcherService:
                 for key, value in getattr(payload, "__dict__", {}).items()
                 if not key.startswith("_")
             }
+            maybe_extraction = getattr(payload, "extraction_data", None)
+            extraction_data = maybe_extraction if isinstance(maybe_extraction, dict) else None
 
         session_data = {}
         if self.phone:
@@ -477,6 +634,22 @@ class DispatcherService:
                 session_data = get_session_data(self.db, self.phone, str(self.user_id), create=False) or {}
             except Exception:
                 session_data = {}
+
+        if (
+            isinstance(extraction_data, dict)
+            and session_data
+            and extraction_data.get("lane_key")
+            and session_data.get("lane_key")
+            and extraction_data.get("lane_key") != session_data.get("lane_key")
+        ):
+            logger.warning(
+                "AUTHORITY_DRIFT_DETECTED",
+                extra={
+                    "session_lane_key": session_data.get("lane_key"),
+                    "extraction_lane_key": extraction_data.get("lane_key"),
+                    "directional_lane_key": extraction_data.get("directional_lane_key"),
+                },
+            )
 
         return {**session_data, **(payload_data or {})}
 
@@ -655,6 +828,33 @@ class DispatcherService:
                 return truck_type
         return TruckType.medium
 
+    @staticmethod
+    def _coerce_vehicle_type(value: Any) -> str | None:
+        normalized = str(value or "").strip().lower().replace(" ", "_")
+        if not normalized:
+            return None
+        for truck_type in TruckType:
+            if truck_type.value == normalized:
+                return truck_type.value
+        return None
+
+    @staticmethod
+    def _resolve_ranking_context_time(data: dict) -> datetime:
+        raw_value = data.get("ranking_context_timestamp")
+        if not raw_value:
+            return datetime.now(timezone.utc)
+        try:
+            parsed = datetime.fromisoformat(str(raw_value))
+        except Exception:
+            logger.warning(
+                "INVALID_RANKING_CONTEXT_TIMESTAMP",
+                extra={"raw_value": raw_value},
+            )
+            return datetime.now(timezone.utc)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
     def _extract_action_id(self, payload: Any) -> str:
         data = self._collect_payload_data(payload)
         return str(data.get("interactive_action_id") or "").strip()
@@ -689,16 +889,26 @@ class DispatcherService:
             return "Live location: unavailable"
         return f"Live location: {lat}, {lng}"
 
-    def _safe_load_matching_summary(self, load: LoadRequest) -> dict:
+    def _safe_load_matching_summary(
+        self,
+        load: LoadRequest,
+        *,
+        ranking_now: datetime | None = None,
+    ) -> dict:
         try:
-            return find_matches_for_load_summary(self.db, load, commit=False)
+            return find_matches_for_load_summary(self.db, load, commit=False, now=ranking_now)
         except Exception as exc:
             logger.warning(f"Load matching skipped for {load.id}: {exc}")
             return {"match_count": 0, "matches": []}
 
-    def _safe_truck_matching_summary(self, listing: TruckSpaceListing) -> dict:
+    def _safe_truck_matching_summary(
+        self,
+        listing: TruckSpaceListing,
+        *,
+        ranking_now: datetime | None = None,
+    ) -> dict:
         try:
-            return find_matches_for_truck_summary(self.db, listing)
+            return find_matches_for_truck_summary(self.db, listing, now=ranking_now)
         except Exception as exc:
             logger.warning(f"Truck matching skipped for {listing.id}: {exc}")
             return {"match_count": 0, "matches": []}

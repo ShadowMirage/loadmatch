@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 from app.contracts.responses import Response, coerce_response
 from app.contracts.enums import Intent
 from app.contracts.route_confidence import RouteConfidence
-from app.main import health_check
+from app.main import backfill_status, constraint_drift, health_check, liquidity_health
 from app.models.load_request import LoadRequest
 from app.models.listing import TruckSpaceListing
 from app.models.rating import Rating
@@ -772,6 +772,118 @@ def test_health_check_stays_local_and_reports_configured_provider():
     assert result["db"] == "ok"
     assert result["redis"] == "ok"
     assert result["anthropic"] == "configured"
+    assert result["canonical_lane_key_backfill"] == {
+        "pending_count": 1,
+        "total_count": 1,
+        "progress_ratio": 0.0,
+    }
+
+
+def test_backfill_status_reports_remaining_rows():
+    class FakeSessionContext:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, query):
+            text_query = str(query)
+            if "WHERE canonical_lane_key IS NULL" in text_query:
+                return 2
+            if "FROM truck_space_listings" in text_query:
+                return 5
+            return 1
+
+    async def run():
+        with patch("app.main.SessionLocal", return_value=FakeSessionContext()):
+            return await backfill_status()
+
+    result = asyncio.run(run())
+
+    assert result == {
+        "canonical_lane_backfill_complete": False,
+        "remaining_rows": 2,
+        "total_rows": 5,
+        "progress_ratio": 0.6,
+    }
+
+
+def test_liquidity_health_returns_internal_snapshot():
+    class FakeSessionContext:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    async def run():
+        with patch("app.main.SessionLocal", return_value=FakeSessionContext()), patch(
+            "app.main.InternalMonitoringService.get_liquidity_health_snapshot",
+            return_value={
+                "active_lanes": 12,
+                "vehicle_segments": 4,
+                "avg_lane_supply": 2.1,
+                "avg_lane_demand": 1.3,
+                "imbalance_ratio": 0.62,
+                "freshness_suppression_rate": 0.14,
+                "duplicate_load_reuse_rate": 0.19,
+                "duplicate_listing_reuse_rate": 0.09,
+            },
+        ):
+            return await liquidity_health()
+
+    result = asyncio.run(run())
+
+    assert result == {
+        "status": "ok",
+        "active_lanes": 12,
+        "vehicle_segments": 4,
+        "avg_lane_supply": 2.1,
+        "avg_lane_demand": 1.3,
+        "imbalance_ratio": 0.62,
+        "freshness_suppression_rate": 0.14,
+        "duplicate_load_reuse_rate": 0.19,
+        "duplicate_listing_reuse_rate": 0.09,
+    }
+
+
+def test_constraint_drift_returns_aggregated_surface():
+    class FakeSessionContext:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    async def run():
+        with patch("app.main.SessionLocal", return_value=FakeSessionContext()), patch(
+            "app.main.InternalMonitoringService.get_constraint_drift_metrics",
+            return_value={
+                "checked_at": "2026-04-08T00:00:00+00:00",
+                "listing_canonical_lane_key_null_count": 1,
+                "listing_vehicle_type_null_count": 2,
+                "load_canonical_lane_key_null_count": 3,
+                "load_vehicle_type_null_count": 4,
+                "duplicate_active_listing_groups": 1,
+                "duplicate_active_load_groups": 2,
+                "stale_executing_count": 5,
+                "request_payload_null_count": 6,
+                "total_violations": 24,
+            },
+        ):
+            return await constraint_drift()
+
+    result = asyncio.run(run())
+
+    assert result["status"] == "drift_detected"
+    assert result["canonical_lane_key_null_rows"] == 4
+    assert result["vehicle_type_null_rows"] == 6
+    assert result["duplicate_active_listings"] == 1
+    assert result["duplicate_active_loads"] == 2
+    assert result["stale_executing_messages"] == 5
+    assert result["request_payload_null_rows"] == 6
+    assert result["total_violations"] == 24
 
 
 def test_debug_dashboard_reads_event_data_field():
@@ -908,6 +1020,41 @@ def test_replay_record_prefers_preserved_extraction_data_for_reconstruction():
     }
 
 
+def test_recovery_takeover_sets_executing_state():
+    record = SimpleNamespace(
+        id="pm-takeover",
+        idempotency_key="user-123:CONFIRM:wamid.takeover:LOAD_FLOW",
+        trace_id="trace-takeover",
+        request_payload={"current_workflow": "LOAD_FLOW"},
+        workflow_step="LOAD_FLOW",
+        retry_count=0,
+        status="FAILED",
+        recovery_attempted_at=None,
+        delivery_state="PENDING",
+    )
+    query = MagicMock()
+    query.filter.return_value = query
+    query.with_for_update.return_value = query
+    query.limit.return_value = query
+    query.all.return_value = [record]
+    db = MagicMock()
+    db.query.return_value = query
+
+    async def run():
+        daemon = RecoveryDaemon(lambda: db)
+        with patch("app.services.recovery_daemon.logger.info") as mock_info, \
+             patch.object(daemon, "_replay_record") as mock_replay_record:
+            await daemon.scan_and_replay()
+            return mock_info, mock_replay_record
+
+    mock_info, mock_replay_record = asyncio.run(run())
+
+    info_messages = [call.args[0] for call in mock_info.call_args_list]
+    assert "RECOVERY_TAKEOVER_EXECUTING_MESSAGE" in info_messages
+    assert record.delivery_state == "EXECUTING"
+    mock_replay_record.assert_awaited_once_with(db, record)
+
+
 def test_fetch_cached_intent_data_ignores_inflight_records():
     service = IdempotencyService(db=None)
     service.find_record = MagicMock(return_value=SimpleNamespace(
@@ -931,6 +1078,136 @@ def test_fetch_cached_intent_data_uses_success_records_only():
         Intent.CREATE_LOAD,
         {"lane_key": "delhi:jaipur"},
     )
+
+
+def test_idempotency_start_suppresses_existing_executing_state():
+    stale_time = datetime(2026, 1, 1)
+    existing = SimpleNamespace(
+        status="EXECUTING",
+        delivery_state="EXECUTING",
+        updated_at=stale_time,
+        created_at=stale_time,
+    )
+    query = MagicMock()
+    query.filter.return_value = query
+    query.with_for_update.return_value = query
+    query.first.return_value = existing
+    db = MagicMock()
+    db.query.return_value = query
+    service = IdempotencyService(db=db)
+
+    result = service.start("idem-key", "trace-1", request_payload={"intent": "CONFIRM"})
+
+    assert result is None
+    db.flush.assert_not_called()
+
+
+def test_executing_overlap_marker_logged():
+    stale_time = datetime(2026, 1, 1)
+    existing = SimpleNamespace(
+        status="EXECUTING",
+        delivery_state="EXECUTING",
+        updated_at=stale_time,
+        created_at=stale_time,
+    )
+    query = MagicMock()
+    query.filter.return_value = query
+    query.with_for_update.return_value = query
+    query.first.return_value = existing
+    db = MagicMock()
+    db.query.return_value = query
+    service = IdempotencyService(db=db)
+
+    with patch("app.services.idempotency_service.logger.info") as mock_info:
+        result = service.start("idem-key", "trace-1", request_payload={"intent": "CONFIRM"}, wamid="wamid.1")
+
+    assert result is None
+    mock_info.assert_called_once()
+    assert mock_info.call_args.args[0] == "EXECUTING_OVERLAP_SUPPRESSED"
+    assert mock_info.call_args.kwargs["extra"] == {
+        "wamid": "wamid.1",
+        "trace_id": "trace-1",
+    }
+
+
+def test_scan_and_reclaim_clears_executing_delivery_state():
+    record = SimpleNamespace(
+        idempotency_key="user-123:CONFIRM:wamid.reclaim:LOAD_FLOW",
+        execution_owner="worker-1",
+        status="EXECUTING",
+        delivery_state="EXECUTING",
+        execution_started_at=datetime(2026, 1, 1),
+    )
+    query = MagicMock()
+    query.filter.return_value = query
+    query.with_for_update.return_value = query
+    query.all.return_value = [record]
+    db = MagicMock()
+    db.query.return_value = query
+
+    async def run():
+        daemon = RecoveryDaemon(lambda: db)
+        await daemon.scan_and_reclaim()
+
+    asyncio.run(run())
+
+    assert record.status == "IN_PROGRESS"
+    assert record.delivery_state == "PENDING"
+    assert record.execution_owner is None
+    assert record.execution_started_at is None
+
+
+def test_zombie_reset_allows_reexecution():
+    stale_time = datetime(2026, 1, 1)
+    existing = SimpleNamespace(
+        status="IN_PROGRESS",
+        delivery_state="PENDING",
+        updated_at=stale_time,
+        created_at=stale_time,
+        trace_id="old-trace",
+        request_payload={"intent": "OLD"},
+        retry_count=1,
+        user_id="user-123",
+        wamid="wamid.old",
+        intent="OLD",
+        confidence=10,
+        workflow_step="LOAD_FLOW",
+        dispatcher_action="OLD",
+        dispatch_started_at=stale_time,
+    )
+    query = MagicMock()
+    query.filter.return_value = query
+    query.with_for_update.return_value = query
+    query.first.return_value = existing
+    db = MagicMock()
+    db.query.return_value = query
+    service = IdempotencyService(db=db, ttl_seconds=30)
+
+    result = service.start(
+        "idem-key",
+        "trace-new",
+        request_payload={"intent": "CONFIRM"},
+        wamid="wamid.new",
+        user_id="user-456",
+        intent="CONFIRM",
+        confidence=99,
+        workflow_step="CONFIRM_FLOW",
+        dispatcher_action="CONFIRM",
+        delivery_state="PENDING",
+    )
+
+    assert result is existing
+    assert existing.status == "IN_PROGRESS"
+    assert existing.trace_id == "trace-new"
+    assert existing.request_payload == {"intent": "CONFIRM"}
+    assert existing.retry_count == 2
+    assert existing.user_id == "user-456"
+    assert existing.wamid == "wamid.new"
+    assert existing.intent == "CONFIRM"
+    assert existing.confidence == 99
+    assert existing.workflow_step == "CONFIRM_FLOW"
+    assert existing.dispatcher_action == "CONFIRM"
+    assert existing.delivery_state == "PENDING"
 
 
 def test_replay_lane_key_stability():

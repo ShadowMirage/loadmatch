@@ -73,6 +73,8 @@ class RecoveryDaemon:
             for job in stuck_jobs:
                 logger.warning(f"Reclaiming stuck job {job.idempotency_key} from owner {job.execution_owner}")
                 job.status = "IN_PROGRESS" # Reset to allow regular scan to pick it up
+                if job.delivery_state == "EXECUTING":
+                    job.delivery_state = "PENDING"
                 job.execution_owner = None
                 job.execution_started_at = None
                 
@@ -126,9 +128,21 @@ class RecoveryDaemon:
                 
                 # 2. Replay Ownership (Maturity logic)
                 record.status = "EXECUTING"
+                record.delivery_state = "EXECUTING"
                 record.execution_owner = get_instance_id()
                 record.execution_started_at = now
                 record.recovery_attempted_at = now
+                logger.info(
+                    "RECOVERY_TAKEOVER_EXECUTING_MESSAGE",
+                    extra={
+                        "trace_id": record.trace_id,
+                        "workflow": (
+                            (record.request_payload or {}).get("current_workflow")
+                            if isinstance(record.request_payload, dict)
+                            else None
+                        ) or getattr(record, "workflow_step", None),
+                    },
+                )
                 await self._replay_record(db, record)
 
         finally:

@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     ADMIN_API_KEY: str = "dev-admin-key"
 
     AI_FIRST_MODE: bool = False
+    MARKETPLACE_DUPLICATE_WINDOW_MINUTES: int = 45
 
     model_config = SettingsConfigDict(
         env_file=".env",

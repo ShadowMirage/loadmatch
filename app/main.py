@@ -17,7 +17,9 @@ from app.database import SessionLocal, engine
 from app.runtime import environment
 from app.runtime.redis_adapter import get_client as get_redis_client
 from app.routers import admin, dashboard, debug, webhook
+from app.services.debug_logger import DebugLogger
 from app.services.event_bus import EventBus
+from app.services.internal_monitoring_service import InternalMonitoringService
 from app.services.recovery_daemon import RecoveryDaemon
 
 class TraceIdFilter(logging.Filter):
@@ -177,6 +179,10 @@ async def _start_primary_services(app: FastAPI):
 
     # 5. Start Heartbeat monitor
     app.state.heartbeat_task = asyncio.create_task(_leadership_heartbeat(app))
+    app.state.internal_monitoring_service = InternalMonitoringService(SessionLocal)
+    app.state.internal_monitoring_task = asyncio.create_task(
+        app.state.internal_monitoring_service.run_forever()
+    )
 
 
 async def _leadership_heartbeat(app: FastAPI):
@@ -267,6 +273,12 @@ async def lifespan(app: FastAPI):
         with contextlib.suppress(asyncio.CancelledError):
             await watchdog_task
 
+    internal_monitoring_task = getattr(app.state, "internal_monitoring_task", None)
+    if internal_monitoring_task:
+        internal_monitoring_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await internal_monitoring_task
+
     event_bus_task = getattr(app.state, "event_bus_task", None)
     if event_bus_task:
         event_bus_task.cancel()
@@ -317,7 +329,10 @@ async def health_check():
     try:
         with SessionLocal() as db:
             db.execute(text("SELECT 1"))
+            lane_backfill = DebugLogger.get_canonical_lane_key_backfill_health(db)
         status["db"] = "ok"
+        if lane_backfill:
+            status["canonical_lane_key_backfill"] = lane_backfill
     except Exception:
         status["db"] = "fail"
         status["status"] = "degraded"
@@ -333,3 +348,94 @@ async def health_check():
     status["whatsapp"] = "configured" if environment.whatsapp_enabled() else "disabled"
 
     return status
+
+
+@app.get("/internal/backfill-status")
+async def backfill_status():
+    status = {
+        "canonical_lane_backfill_complete": False,
+        "remaining_rows": None,
+    }
+
+    try:
+        with SessionLocal() as db:
+            lane_backfill = DebugLogger.get_canonical_lane_key_backfill_status(db)
+        if lane_backfill:
+            status["canonical_lane_backfill_complete"] = lane_backfill["canonical_lane_backfill_complete"]
+            status["remaining_rows"] = lane_backfill["remaining_rows"]
+            status["total_rows"] = lane_backfill["total_rows"]
+            status["progress_ratio"] = lane_backfill["progress_ratio"]
+    except Exception:
+        status["status"] = "degraded"
+
+    return status
+
+
+@app.get("/internal/liquidity-health")
+async def liquidity_health():
+    snapshot = {
+        "status": "ok",
+        "active_lanes": 0,
+        "vehicle_segments": 0,
+        "avg_lane_supply": 0.0,
+        "avg_lane_demand": 0.0,
+        "imbalance_ratio": 0.0,
+        "freshness_suppression_rate": 0.0,
+        "duplicate_load_reuse_rate": 0.0,
+        "duplicate_listing_reuse_rate": 0.0,
+    }
+    try:
+        with SessionLocal() as db:
+            snapshot.update(InternalMonitoringService.get_liquidity_health_snapshot(db))
+    except Exception:
+        snapshot["status"] = "degraded"
+    return snapshot
+
+
+@app.get("/internal/constraint-drift")
+async def constraint_drift():
+    snapshot = {
+        "status": "ok",
+        "canonical_lane_key_null_rows": 0,
+        "vehicle_type_null_rows": 0,
+        "duplicate_active_listings": 0,
+        "duplicate_active_loads": 0,
+        "stale_executing_messages": 0,
+        "request_payload_null_rows": 0,
+    }
+    try:
+        stale_executing_minutes = 5
+        monitoring = getattr(app.state, "internal_monitoring_service", None)
+        if monitoring is not None:
+            stale_executing_minutes = getattr(monitoring, "stale_executing_minutes", 5)
+
+        with SessionLocal() as db:
+            metrics = InternalMonitoringService.get_constraint_drift_metrics(
+                db,
+                stale_executing_minutes=stale_executing_minutes,
+            )
+
+        snapshot.update(
+            {
+                "checked_at": metrics.get("checked_at"),
+                "canonical_lane_key_null_rows": (
+                    int(metrics.get("listing_canonical_lane_key_null_count", 0))
+                    + int(metrics.get("load_canonical_lane_key_null_count", 0))
+                ),
+                "vehicle_type_null_rows": (
+                    int(metrics.get("listing_vehicle_type_null_count", 0))
+                    + int(metrics.get("load_vehicle_type_null_count", 0))
+                ),
+                "duplicate_active_listings": int(metrics.get("duplicate_active_listing_groups", 0)),
+                "duplicate_active_loads": int(metrics.get("duplicate_active_load_groups", 0)),
+                "stale_executing_messages": int(metrics.get("stale_executing_count", 0)),
+                "request_payload_null_rows": int(metrics.get("request_payload_null_count", 0)),
+                "total_violations": int(metrics.get("total_violations", 0)),
+                "raw_metrics": metrics,
+            }
+        )
+        if snapshot["total_violations"] > 0:
+            snapshot["status"] = "drift_detected"
+    except Exception:
+        snapshot["status"] = "degraded"
+    return snapshot

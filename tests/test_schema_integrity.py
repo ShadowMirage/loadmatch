@@ -290,6 +290,31 @@ def test_workflow_events_schema(inspector):
     ), "workflow_events.processed_message_id must reference processed_messages.id"
 
 
+def test_truck_space_listings_schema_has_canonical_lane_key(inspector):
+    _assert_required_columns(
+        inspector,
+        "truck_space_listings",
+        ["canonical_lane_key", "vehicle_type"],
+    )
+
+
+def test_load_requests_schema_has_canonical_lane_key(inspector):
+    _assert_required_columns(
+        inspector,
+        "load_requests",
+        ["canonical_lane_key", "vehicle_type"],
+    )
+
+
+def test_truck_space_listings_has_unique_user_lane_vehicle_open_index(inspector):
+    indexes = inspector.get_indexes("truck_space_listings")
+    unique_index = next((index for index in indexes if index.get("name") == "unique_user_lane_vehicle_open"), None)
+
+    assert unique_index is not None, "truck_space_listings must expose unique_user_lane_vehicle_open"
+    assert bool(unique_index.get("unique")) is True
+    assert unique_index.get("column_names") == ["owner_id", "canonical_lane_key", "vehicle_type"]
+
+
 def test_conversation_states_schema(inspector):
     columns = _assert_required_columns(
         inspector,

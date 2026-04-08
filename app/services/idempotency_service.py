@@ -1,3 +1,4 @@
+import logging
 import hashlib
 import json
 from datetime import datetime, timedelta, timezone
@@ -10,6 +11,8 @@ from sqlalchemy.orm import Session
 from app.models.processed_message import ProcessedMessage
 from app.contracts.enums import Intent
 from app.services.payload_factory import PayloadFactory
+
+logger = logging.getLogger(__name__)
 
 
 class IdempotencyService:
@@ -93,6 +96,16 @@ class IdempotencyService:
         )
 
         if existing:
+            if existing.delivery_state == "EXECUTING":
+                logger.info(
+                    "EXECUTING_OVERLAP_SUPPRESSED",
+                    extra={
+                        "wamid": canonical_wamid,
+                        "trace_id": trace_id,
+                    },
+                )
+                return None
+
             if existing.status == "SUCCESS":
                 return None
 

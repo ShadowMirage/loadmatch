@@ -260,6 +260,16 @@ async def _phase2_atomic_dispatch(
     else:
         # Construct idempotency key (stable across replays)
         idem_key = f"{locked_user.id}:{intent.value}:{wa_id}:{transition.next_state}"
+        ranking_context_timestamp = datetime.now(timezone.utc).isoformat()
+
+        if isinstance(extraction.data, dict):
+            extraction.data["ranking_context_timestamp"] = ranking_context_timestamp
+        if isinstance(payload, dict):
+            payload.setdefault("ranking_context_timestamp", ranking_context_timestamp)
+        elif hasattr(payload, "data") and isinstance(getattr(payload, "data"), dict):
+            payload.data.setdefault("ranking_context_timestamp", ranking_context_timestamp)
+        if hasattr(payload, "extraction_data") and isinstance(getattr(payload, "extraction_data"), dict):
+            payload.extraction_data["ranking_context_timestamp"] = ranking_context_timestamp
 
         # Persist both the dispatcher payload and the full normalized extraction
         # context so replay can rebuild typed payloads without losing routing metadata.
@@ -277,6 +287,7 @@ async def _phase2_atomic_dispatch(
             "phone": phone,
             "wa_id": wa_id,
             "current_workflow": current_db_state,
+            "ranking_context_timestamp": ranking_context_timestamp,
         }
 
         # 2. Check/Start Idempotency Record

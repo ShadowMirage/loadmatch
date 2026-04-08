@@ -10,7 +10,11 @@ from app.models.listing import TruckSpaceListing
 from app.models.match import Match
 from app.models.kyc import KycDocument
 from app.services.logistics_data import CITY_ALIASES, normalize_hub_name
-from app.services.matching_service import find_matches_for_load, update_listing_capacity_after_match
+from app.services.matching_service import (
+    canonical_lane_key,
+    find_matches_for_load,
+    update_listing_capacity_after_match,
+)
 from app.services.storage_service import upload_whatsapp_media
 
 TOOLS = [
@@ -123,6 +127,16 @@ def _canonical_city(value):
     return stripped or None
 
 
+def _coerce_vehicle_type(value):
+    normalized = str(value or "").strip().lower().replace(" ", "_")
+    if not normalized:
+        return None
+    for truck_type in TruckType:
+        if truck_type.value == normalized:
+            return truck_type.value
+    return None
+
+
 def _backhaul_city_candidates(value):
     canonical = _canonical_city(value)
     candidates: set[str] = set()
@@ -150,10 +164,14 @@ async def execute_tool(name: str, args: dict, db: Session, user: User) -> dict:
             return {"error": "User is not KYC verified. Ask them to press 'Upload KYC' from the Main Menu to verify their identity before creating loads."}
             
         pickup_date = datetime.datetime.strptime(args["pickup_date"], "%Y-%m-%d").date()
+        from_city = normalize_hub_name(args["from_city"])
+        to_city = normalize_hub_name(args["to_city"])
         load = LoadRequest(
             shipper_id=user.id,
-            from_city=normalize_hub_name(args["from_city"]),
-            to_city=normalize_hub_name(args["to_city"]),
+            from_city=from_city,
+            to_city=to_city,
+            canonical_lane_key=canonical_lane_key(from_city, to_city),
+            vehicle_type=_coerce_vehicle_type(args.get("vehicle_type") or args.get("truck_type")),
             pickup_date=pickup_date,
             weight_kg=args["weight_kg"],
             category=args.get("category"),
