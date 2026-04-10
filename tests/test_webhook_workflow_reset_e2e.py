@@ -141,7 +141,7 @@ def test_cancel_then_restart_same_flow_starts_clean():
 
     first_response, second_response, cancel_response, restart_response = asyncio.run(run())
 
-    assert first_response.text == "Please share the pickup city, or tell me where the load starts from."
+    assert "Please provide:" in first_response.text and "1. Pickup city" in first_response.text
     assert "Confirming your truck availability" in second_response.text
     assert "cancelled" in cancel_response.text.lower()
-    assert restart_response.text == "Please share the pickup city, or tell me where the load starts from."
+    assert "Please provide:" in restart_response.text and "1. Pickup city" in restart_response.text

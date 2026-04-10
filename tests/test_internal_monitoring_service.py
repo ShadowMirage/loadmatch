@@ -151,6 +151,31 @@ def test_constraint_drift_metrics_detect_authority_violations(session):
     assert metrics["total_violations"] >= 7
 
 
+def test_constraint_drift_metrics_skips_listing_checks_when_columns_missing(session, monkeypatch):
+    now = datetime.now(timezone.utc)
+    original = InternalMonitoringService._table_column_names
+
+    def fake_table_columns(db, table_name: str):
+        if table_name == "truck_space_listings":
+            return {"id", "owner_id", "status"}
+        return original(db, table_name)
+
+    monkeypatch.setattr(
+        InternalMonitoringService,
+        "_table_column_names",
+        staticmethod(fake_table_columns),
+    )
+
+    metrics = InternalMonitoringService.get_constraint_drift_metrics(session, now=now)
+
+    assert metrics["listing_canonical_lane_key_null_count"] == 0
+    assert metrics["listing_vehicle_type_null_count"] == 0
+    assert metrics["duplicate_active_listing_groups"] == 0
+    assert metrics["schema_support"]["truck_space_listings"]["canonical_lane_key"] is False
+    assert metrics["schema_support"]["truck_space_listings"]["directional_lane_key"] is False
+    assert metrics["schema_support"]["truck_space_listings"]["reverse_directional_lane_key"] is False
+
+
 def test_liquidity_health_snapshot_reports_supply_demand_and_suppression_rates(session):
     now = datetime.now(timezone.utc)
     transporter = _create_user(session, "2001", UserRole.transporter)

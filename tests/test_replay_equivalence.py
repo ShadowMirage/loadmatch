@@ -54,7 +54,7 @@ def test_replay_prompt_order_identical():
 
     assert live_response.text == replay_response.text
     assert "Just confirming the route: Jaipur → Delhi." in live_response.text
-    assert "please share the load weight." in live_response.text.lower()
+    assert "load weight" in live_response.text.lower()
 
 
 def test_replay_confirmation_text_identical():

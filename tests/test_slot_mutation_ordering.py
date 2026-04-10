@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 
 from app.contracts.enums import Intent
 from app.contracts.extraction import ExtractionResult
-from app.contracts.payloads import CreateLoadPayload
+from app.contracts.payloads import CreateLoadPayload, PostTruckPayload
 from app.routers.webhook import _phase1_resolve_intent
 from app.services.dispatcher_service import DispatcherService
 from app.services.intent_resolver import IntentResolver
@@ -276,3 +276,92 @@ def test_multi_field_correction_ordering_consistency():
     assert session_store["directional_lane_key"] == "delhi->mumbai"
     assert route_payload.to_city == "mumbai"
     assert weight_payload.weight_kg == 10000
+
+
+def test_load_flow_capacity_alias_maps_to_weight_for_payload_build():
+    async def run():
+        msg = {"type": "text", "text": {"body": "alwar ghaziabad 6 ton tomorrow"}}
+        user = SimpleNamespace(id="user-123", state="LOAD_FLOW")
+        extraction_engine = _StubExtractionEngine(
+            ExtractionResult(
+                intent=Intent.UNKNOWN,
+                data={"from_city": "alwar", "to_city": "ghaziabad", "capacity": "6 ton", "date": "tomorrow"},
+                confidence=0.4,
+                source="TEST",
+                trace_id="trace-capacity-alias-load",
+            )
+        )
+        resolver = IntentResolver()
+        factory = PayloadFactory()
+        idempotency = MagicMock()
+        idempotency.fetch_cached_intent_data.return_value = None
+
+        with patch("app.routers.webhook.peek_session", return_value=SimpleNamespace(current_workflow="LOAD_FLOW")), \
+             patch("app.routers.webhook.get_session_data", return_value={"resolver_version": "v-test"}):
+            return await _phase1_resolve_intent(
+                msg=msg,
+                phone="919999999999",
+                wa_id="wamid.capacity-alias-load",
+                user=user,
+                db=MagicMock(),
+                extraction_engine=extraction_engine,
+                intent_resolver=resolver,
+                payload_factory=factory,
+                idempotency=idempotency,
+            )
+
+    intent, payload, extraction, current_workflow = asyncio.run(run())
+
+    assert current_workflow == "LOAD_FLOW"
+    assert intent == Intent.CREATE_LOAD
+    assert extraction.data["capacity_kg"] == 6000
+    assert extraction.data["weight_kg"] == 6000
+    assert extraction.data["resolver_version"]
+    assert isinstance(payload, CreateLoadPayload)
+    assert payload.weight_kg == 6000
+
+
+def test_unknown_route_defaults_to_truck_flow_when_active_workflow_is_truck():
+    async def run():
+        msg = {"type": "text", "text": {"body": "delhi jaipur"}}
+        user = SimpleNamespace(id="user-123", state="TRUCK_FLOW")
+        extraction_engine = _StubExtractionEngine(
+            ExtractionResult(
+                intent=Intent.UNKNOWN,
+                data={"from_city": "delhi", "to_city": "jaipur", "weight_kg": 9000},
+                confidence=0.4,
+                source="TEST",
+                trace_id="trace-unknown-route-truck-flow",
+            )
+        )
+        resolver = IntentResolver()
+        factory = PayloadFactory()
+        idempotency = MagicMock()
+        idempotency.fetch_cached_intent_data.return_value = None
+
+        with patch("app.routers.webhook.peek_session", return_value=SimpleNamespace(current_workflow="TRUCK_FLOW")), \
+             patch(
+                 "app.routers.webhook.get_session_data",
+                 return_value={
+                     "lane_key": "delhi:jaipur",
+                     "directional_lane_key": "delhi->jaipur",
+                     "resolver_version": "v-test",
+                 },
+             ):
+            return await _phase1_resolve_intent(
+                msg=msg,
+                phone="919999999999",
+                wa_id="wamid.unknown-route-truck-flow",
+                user=user,
+                db=MagicMock(),
+                extraction_engine=extraction_engine,
+                intent_resolver=resolver,
+                payload_factory=factory,
+                idempotency=idempotency,
+            )
+
+    intent, payload, extraction, _ = asyncio.run(run())
+
+    assert intent == Intent.POST_TRUCK
+    assert extraction.data["capacity_kg"] == 9000
+    assert isinstance(payload, PostTruckPayload)

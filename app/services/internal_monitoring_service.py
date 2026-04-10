@@ -2,7 +2,7 @@ import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import String, cast, func, or_
+from sqlalchemy import String, cast, func, inspect, or_
 from sqlalchemy.orm import Session
 
 from app.models.enums import ListingStatus, LoadRequestStatus
@@ -94,6 +94,23 @@ class InternalMonitoringService:
             db.close()
 
     @staticmethod
+    def _table_column_names(db: Session, table_name: str) -> set[str]:
+        try:
+            inspector = inspect(db.get_bind())
+            return {
+                str(column.get("name"))
+                for column in inspector.get_columns(table_name)
+                if column.get("name")
+            }
+        except Exception:
+            logger.warning(
+                "CONSTRAINT_DRIFT_SCHEMA_INTROSPECTION_FAILED",
+                extra={"table": table_name},
+                exc_info=True,
+            )
+            return set()
+
+    @staticmethod
     def get_constraint_drift_metrics(
         db: Session,
         *,
@@ -103,68 +120,92 @@ class InternalMonitoringService:
         now = now or datetime.now(timezone.utc)
         stale_cutoff = now - timedelta(minutes=stale_executing_minutes)
 
+        listing_columns = InternalMonitoringService._table_column_names(db, "truck_space_listings")
+        load_columns = InternalMonitoringService._table_column_names(db, "load_requests")
+
+        listing_has_canonical_lane_key = "canonical_lane_key" in listing_columns
+        listing_has_vehicle_type = "vehicle_type" in listing_columns
+        listing_has_directional_lane_key = "directional_lane_key" in listing_columns
+        listing_has_reverse_directional_lane_key = "reverse_directional_lane_key" in listing_columns
+        load_has_canonical_lane_key = "canonical_lane_key" in load_columns
+        load_has_vehicle_type = "vehicle_type" in load_columns
+        load_has_directional_lane_key = "directional_lane_key" in load_columns
+        load_has_reverse_directional_lane_key = "reverse_directional_lane_key" in load_columns
+
         listing_canonical_lane_key_null_count = (
             db.query(TruckSpaceListing)
             .filter(TruckSpaceListing.canonical_lane_key.is_(None))
             .count()
+            if listing_has_canonical_lane_key
+            else 0
         )
         listing_vehicle_type_null_count = (
             db.query(TruckSpaceListing)
             .filter(TruckSpaceListing.vehicle_type.is_(None))
             .count()
+            if listing_has_vehicle_type
+            else 0
         )
         load_canonical_lane_key_null_count = (
             db.query(LoadRequest)
             .filter(LoadRequest.canonical_lane_key.is_(None))
             .count()
+            if load_has_canonical_lane_key
+            else 0
         )
         load_vehicle_type_null_count = (
             db.query(LoadRequest)
             .filter(LoadRequest.vehicle_type.is_(None))
             .count()
+            if load_has_vehicle_type
+            else 0
         )
 
-        duplicate_active_listing_groups = (
-            db.query(func.count())
-            .select_from(
-                db.query(
-                    TruckSpaceListing.owner_id,
-                    TruckSpaceListing.canonical_lane_key,
-                    TruckSpaceListing.vehicle_type,
+        duplicate_active_listing_groups = 0
+        if listing_has_canonical_lane_key and listing_has_vehicle_type:
+            duplicate_active_listing_groups = (
+                db.query(func.count())
+                .select_from(
+                    db.query(
+                        TruckSpaceListing.owner_id,
+                        TruckSpaceListing.canonical_lane_key,
+                        TruckSpaceListing.vehicle_type,
+                    )
+                    .filter(TruckSpaceListing.status.in_(ACTIVE_LISTING_STATUSES))
+                    .group_by(
+                        TruckSpaceListing.owner_id,
+                        TruckSpaceListing.canonical_lane_key,
+                        TruckSpaceListing.vehicle_type,
+                    )
+                    .having(func.count() > 1)
+                    .subquery()
                 )
-                .filter(TruckSpaceListing.status.in_(ACTIVE_LISTING_STATUSES))
-                .group_by(
-                    TruckSpaceListing.owner_id,
-                    TruckSpaceListing.canonical_lane_key,
-                    TruckSpaceListing.vehicle_type,
-                )
-                .having(func.count() > 1)
-                .subquery()
+                .scalar()
+                or 0
             )
-            .scalar()
-            or 0
-        )
 
-        duplicate_active_load_groups = (
-            db.query(func.count())
-            .select_from(
-                db.query(
-                    LoadRequest.shipper_id,
-                    LoadRequest.canonical_lane_key,
-                    LoadRequest.vehicle_type,
+        duplicate_active_load_groups = 0
+        if load_has_canonical_lane_key and load_has_vehicle_type:
+            duplicate_active_load_groups = (
+                db.query(func.count())
+                .select_from(
+                    db.query(
+                        LoadRequest.shipper_id,
+                        LoadRequest.canonical_lane_key,
+                        LoadRequest.vehicle_type,
+                    )
+                    .filter(LoadRequest.status.in_(ACTIVE_LOAD_STATUSES))
+                    .group_by(
+                        LoadRequest.shipper_id,
+                        LoadRequest.canonical_lane_key,
+                        LoadRequest.vehicle_type,
+                    )
+                    .having(func.count() > 1)
+                    .subquery()
                 )
-                .filter(LoadRequest.status.in_(ACTIVE_LOAD_STATUSES))
-                .group_by(
-                    LoadRequest.shipper_id,
-                    LoadRequest.canonical_lane_key,
-                    LoadRequest.vehicle_type,
-                )
-                .having(func.count() > 1)
-                .subquery()
+                .scalar()
+                or 0
             )
-            .scalar()
-            or 0
-        )
 
         stale_executing_count = (
             db.query(ProcessedMessage)
@@ -207,6 +248,20 @@ class InternalMonitoringService:
             "stale_executing_count": stale_executing_count,
             "request_payload_null_count": request_payload_null_count,
             "total_violations": total_violations,
+            "schema_support": {
+                "truck_space_listings": {
+                    "canonical_lane_key": listing_has_canonical_lane_key,
+                    "vehicle_type": listing_has_vehicle_type,
+                    "directional_lane_key": listing_has_directional_lane_key,
+                    "reverse_directional_lane_key": listing_has_reverse_directional_lane_key,
+                },
+                "load_requests": {
+                    "canonical_lane_key": load_has_canonical_lane_key,
+                    "vehicle_type": load_has_vehicle_type,
+                    "directional_lane_key": load_has_directional_lane_key,
+                    "reverse_directional_lane_key": load_has_reverse_directional_lane_key,
+                },
+            },
         }
 
     @staticmethod

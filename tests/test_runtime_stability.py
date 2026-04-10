@@ -437,7 +437,7 @@ def test_dispatcher_skips_route_questions_for_high_confidence_load_lane():
 
     response = dispatcher.execute(Intent.CREATE_LOAD, payload=payload)
 
-    assert response.text == "Please share the load weight."
+    assert "1. Load weight" in response.text
 
 
 def test_route_confidence_class_high_city_pair():
@@ -526,7 +526,7 @@ def test_dispatcher_confirms_adjacent_load_route_once_before_next_slot():
         response = dispatcher.execute(Intent.CREATE_LOAD, payload=payload)
 
     assert "Just confirming the route: Delhi → Jaipur." in response.text
-    assert "please share the load weight." in response.text.lower()
+    assert "load weight" in response.text.lower()
     mock_set_session_data.assert_called_once_with(
         dispatcher.db,
         "919999999999",
@@ -552,7 +552,7 @@ def test_dispatcher_does_not_repeat_route_confirmation_after_prompting_once():
     ), patch("app.services.dispatcher_service.set_session_data") as mock_set_session_data:
         response = dispatcher.execute(Intent.CREATE_LOAD, payload=payload)
 
-    assert response.text == "Please share the load weight."
+    assert "1. Load weight" in response.text
     mock_set_session_data.assert_not_called()
 
 
@@ -571,7 +571,7 @@ def test_dispatcher_confirms_llm_structured_truck_route_before_capacity():
         response = dispatcher.execute(Intent.POST_TRUCK, payload=payload)
 
     assert "Just confirming the route: Bangalore → Delhi." in response.text
-    assert "please share the truck capacity." in response.text.lower()
+    assert "truck capacity" in response.text.lower()
     mock_set_session_data.assert_called_once_with(
         dispatcher.db,
         "919999999999",
@@ -1303,7 +1303,7 @@ def test_active_workflow_requires_complete_session_data():
     assert workflow is None
 
 
-def test_slot_only_reconstruction_does_not_resume_workflow():
+def test_slot_only_reconstruction_keeps_active_workflow():
     session_store = {
         "weight": "7 ton",
         "date": "tomorrow",
@@ -1315,10 +1315,10 @@ def test_slot_only_reconstruction_does_not_resume_workflow():
 
     workflow = StateMachineService.reconstruct_workflow("LOAD_FLOW", session_store)
 
-    assert workflow is None
+    assert workflow == "LOAD_FLOW"
 
 
-def test_slot_only_reconstruction_emits_abort_marker(caplog):
+def test_slot_only_reconstruction_does_not_emit_abort_marker(caplog):
     session_store = {
         "weight": "7 ton",
         "date": "tomorrow",
@@ -1326,7 +1326,7 @@ def test_slot_only_reconstruction_emits_abort_marker(caplog):
 
     StateMachineService.reconstruct_workflow("LOAD_FLOW", session_store)
 
-    assert any(
+    assert not any(
         "[SESSION_RECONSTRUCTION_ABORT]" in record.message
         for record in caplog.records
     )

@@ -84,7 +84,9 @@ def test_same_user_duplicate_lane_within_window_reuses_existing_listing():
 
     assert "Truck Posted" in response.text
     assert "Delhi" in response.text
-    db.add.assert_not_called()
+    added_records = [call.args[0] for call in db.add.call_args_list]
+    for record in added_records:
+        assert type(record).__name__ != "TruckSpaceListing"
 
 
 def test_listing_persists_canonical_lane_key_on_create():

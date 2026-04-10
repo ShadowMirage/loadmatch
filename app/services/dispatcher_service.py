@@ -30,13 +30,17 @@ from app.services.matching_service import (
     find_matches_for_truck_summary,
 )
 from app.services.event_logger import track_event
-from app.services.session_manager import clear_session, get_session_data, set_session_data
+from app.services.session_manager import get_session_data, set_session_data
 from app.services.state_machine_service import StateMachineService
 
 logger = logging.getLogger(__name__)
 
 UNIQUE_LANE_OPEN_INDEX_NAME = "unique_user_lane_open"
 UNIQUE_LANE_VEHICLE_OPEN_INDEX_NAME = "unique_user_lane_vehicle_open"
+
+
+def clear_session(db: Session, phone: str) -> None:
+    StateMachineService.clear_session_and_metadata(db, phone)
 
 
 def _is_unique_lane_open_violation(error: IntegrityError) -> bool:
@@ -125,12 +129,19 @@ class DispatcherService:
     def _handle_create_load_prompt(self, payload: CreateLoadPayload) -> ContractResponse:
         """Guide the user through missing slots, then confirm collected data."""
         data = self._collect_payload_data(payload)
-        missing_field = self._missing_load_field(data)
-        if missing_field:
-            if missing_field == "route_confirmation":
+        
+        # Validate Unknowns natively
+        if data.get("from_city") and self._city_label(data.get("from_city")) == "Unknown":
+            data.pop("from_city", None)
+        if data.get("to_city") and self._city_label(data.get("to_city")) == "Unknown":
+            data.pop("to_city", None)
+
+        missing_fields = self._get_missing_load_fields(data)
+        if missing_fields:
+            if "route_confirmation" in missing_fields:
                 self._mark_route_confirmation_prompted(data, flow="load")
                 return self._ask_for_route_confirmation("load", data)
-            return self._ask_for_missing_field("load", missing_field)
+            return self._ask_for_missing_fields("load", missing_fields)
 
         from_city = self._city_label(data.get("from_city"))
         to_city = self._city_label(data.get("to_city"))
@@ -156,12 +167,21 @@ class DispatcherService:
     def _handle_post_truck_prompt(self, payload: PostTruckPayload) -> ContractResponse:
         """Guide the user through missing slots, then confirm collected data."""
         data = self._collect_payload_data(payload)
-        missing_field = self._missing_truck_field(data)
-        if missing_field:
-            if missing_field == "route_confirmation":
+        
+        # Validate Unknowns natively
+        if data.get("from_city") and self._city_label(data.get("from_city")) == "Unknown":
+            data.pop("from_city", None)
+        if data.get("to_city") and self._city_label(data.get("to_city")) == "Unknown":
+            data.pop("to_city", None)
+        if data.get("current_city") and self._city_label(data.get("current_city")) == "Unknown":
+            data.pop("current_city", None)
+
+        missing_fields = self._get_missing_truck_fields(data)
+        if missing_fields:
+            if "route_confirmation" in missing_fields:
                 self._mark_route_confirmation_prompted(data, flow="truck")
                 return self._ask_for_route_confirmation("truck", data)
-            return self._ask_for_missing_field("truck", missing_field)
+            return self._ask_for_missing_fields("truck", missing_fields)
 
         from_city = self._city_label(data.get("current_city") or data.get("from_city"))
         to_city = self._city_label(data.get("to_city"))
@@ -188,9 +208,14 @@ class DispatcherService:
         """Actually create the LoadRequest in DB."""
         try:
             data = self._collect_payload_data(payload)
-            missing_field = self._missing_load_field(data)
-            if missing_field:
-                return self._ask_for_missing_field("load", missing_field)
+            if data.get("from_city") and self._city_label(data.get("from_city")) == "Unknown":
+                data.pop("from_city", None)
+            if data.get("to_city") and self._city_label(data.get("to_city")) == "Unknown":
+                data.pop("to_city", None)
+
+            missing_fields = self._get_missing_load_fields(data)
+            if missing_fields:
+                return self._ask_for_missing_fields("load", missing_fields)
 
             from_city = self._city_label(data.get("from_city"))
             to_city = self._city_label(data.get("to_city"))
@@ -273,9 +298,16 @@ class DispatcherService:
         """Actually create the Listing in DB."""
         try:
             data = self._collect_payload_data(payload)
-            missing_field = self._missing_truck_field(data)
-            if missing_field:
-                return self._ask_for_missing_field("truck", missing_field)
+            if data.get("from_city") and self._city_label(data.get("from_city")) == "Unknown":
+                data.pop("from_city", None)
+            if data.get("to_city") and self._city_label(data.get("to_city")) == "Unknown":
+                data.pop("to_city", None)
+            if data.get("current_city") and self._city_label(data.get("current_city")) == "Unknown":
+                data.pop("current_city", None)
+
+            missing_fields = self._get_missing_truck_fields(data)
+            if missing_fields:
+                return self._ask_for_missing_fields("truck", missing_fields)
 
             capacity_kg = int(data.get("capacity_kg") or 0)
             registration_number = (data.get("plate") or f"TRK{str(self.user_id).replace('-', '')[:8]}").upper()
@@ -651,7 +683,18 @@ class DispatcherService:
                 },
             )
 
-        return {**session_data, **(payload_data or {})}
+        if isinstance(extraction_data, dict):
+            if extraction_data.get("from_city") and extraction_data.get("to_city"):
+                session_data["from_city"] = extraction_data.get("from_city")
+                session_data["to_city"] = extraction_data.get("to_city")
+
+        clean_payload = {k: v for k, v in (payload_data or {}).items() if v is not None}
+
+        return {
+            **session_data,
+            **(extraction_data or {}),
+            **clean_payload
+        }
 
     @staticmethod
     def _city_label(value: Any) -> str:
@@ -737,87 +780,88 @@ class DispatcherService:
             {"route_confirmation_prompted_for": signature},
         )
 
-    def _missing_load_field(self, data: dict) -> Optional[str]:
+    def _get_missing_load_fields(self, data: dict) -> list[str]:
         route_confidence = self._route_confidence_class(data)
-        route_missing = self._next_missing_field(data, ("from_city", "to_city"))
-        non_route_missing = self._next_missing_field(
-            data,
-            ("weight_kg", "date"),
-            aliases={"date": ("pickup_date", "date")},
-        )
+        missing = []
+        if self._next_missing_field(data, ("from_city",)): missing.append("from_city")
+        if self._next_missing_field(data, ("to_city",)): missing.append("to_city")
+        if self._next_missing_field(data, ("weight_kg",)): missing.append("weight_kg")
+        if self._next_missing_field(data, ("date",), aliases={"date": ("pickup_date", "date")}): missing.append("date")
 
-        if route_confidence == RouteConfidence.HIGH and self._load_route_present(data):
-            return non_route_missing
+        route_missing = "from_city" in missing or "to_city" in missing
+        non_route_missing = "weight_kg" in missing or "date" in missing
 
         if (
             route_confidence == RouteConfidence.MEDIUM
-            and self._load_route_present(data)
+            and not route_missing
             and non_route_missing
             and not self._route_confirmation_prompted(data, flow="load")
         ):
-            return "route_confirmation"
+            return ["route_confirmation"] + missing
 
-        return route_missing or non_route_missing
+        return missing
 
-    def _missing_truck_field(self, data: dict) -> Optional[str]:
+    def _get_missing_truck_fields(self, data: dict) -> list[str]:
         route_confidence = self._route_confidence_class(data)
-        route_missing = self._next_missing_field(
-            data,
-            ("from_city", "to_city"),
-            aliases={"from_city": ("current_city", "from_city")},
-        )
-        non_route_missing = self._next_missing_field(
-            data,
-            ("capacity_kg", "date"),
-            aliases={"date": ("departure_date", "date")},
-        )
+        missing = []
+        if self._next_missing_field(data, ("from_city",), aliases={"from_city": ("current_city", "from_city")}): missing.append("from_city")
+        if self._next_missing_field(data, ("to_city",)): missing.append("to_city")
+        if self._next_missing_field(data, ("capacity_kg",)): missing.append("capacity_kg")
+        if self._next_missing_field(data, ("date",), aliases={"date": ("departure_date", "date")}): missing.append("date")
 
-        if route_confidence == RouteConfidence.HIGH and self._truck_route_present(data):
-            return non_route_missing
+        route_missing = "from_city" in missing or "to_city" in missing
+        non_route_missing = "capacity_kg" in missing or "date" in missing
 
         if (
             route_confidence == RouteConfidence.MEDIUM
-            and self._truck_route_present(data)
+            and not route_missing
             and non_route_missing
             and not self._route_confirmation_prompted(data, flow="truck")
         ):
-            return "route_confirmation"
+            return ["route_confirmation"] + missing
 
-        return route_missing or non_route_missing
+        return missing
 
     @staticmethod
-    def _ask_for_missing_field(flow: str, field_name: str) -> ContractResponse:
-        prompts = {
-            "from_city": "Please share the pickup city, or tell me where the load starts from.",
-            "to_city": "Please share the destination city.",
-            "weight_kg": "Please share the load weight.",
-            "capacity_kg": "Please share the truck capacity.",
-            "date": "Please share the pickup date.",
+    def _ask_for_missing_fields(flow: str, fields: list[str]) -> ContractResponse:
+        slot_labels = {
+            "from_city": "Pickup city",
+            "to_city": "Destination city",
+            "capacity_kg": "Truck capacity" if flow == "truck" else "Capacity",
+            "weight_kg": "Load weight",
+            "date": "Departure date" if flow == "truck" else "Pickup date",
         }
-        if flow == "truck" and field_name == "date":
-            prompts["date"] = "Please share the departure date."
-        return ContractResponse(text=prompts.get(field_name, "Please share the missing details."))
+        
+        display_fields = [f for f in fields if f in slot_labels]
+        
+        if not display_fields:
+            return ContractResponse(text="Please share the missing details.")
+
+        formatted = "\n".join(
+            f"{i+1}. {slot_labels[s]}"
+            for i, s in enumerate(display_fields)
+        )
+        return ContractResponse(text=f"Please provide:\n{formatted}")
 
     def _ask_for_route_confirmation(self, flow: str, data: dict) -> ContractResponse:
         if flow == "truck":
             origin = self._city_label(data.get("current_city") or data.get("from_city"))
-            next_field = self._next_missing_field(
-                data,
-                ("capacity_kg", "date"),
-                aliases={"date": ("departure_date", "date")},
-            )
+            missing_fields = self._get_missing_truck_fields(data)
         else:
             origin = self._city_label(data.get("from_city"))
-            next_field = self._next_missing_field(
-                data,
-                ("weight_kg", "date"),
-                aliases={"date": ("pickup_date", "date")},
-            )
+            missing_fields = self._get_missing_load_fields(data)
 
         destination = self._city_label(data.get("to_city"))
-        follow_up = self._ask_for_missing_field(flow, next_field).text if next_field else "Reply with any correction if this route is wrong."
+        display_fields = [f for f in missing_fields if f != "route_confirmation"]
+
+        if display_fields:
+            follow_up = self._ask_for_missing_fields(flow, display_fields).text
+            follow_up = follow_up[0].lower() + follow_up[1:]
+        else:
+            follow_up = "reply with any correction if this route is wrong."
+
         return ContractResponse(
-            text=f"Just confirming the route: {origin} → {destination}.\nIf that's right, {follow_up[0].lower()}{follow_up[1:]}"
+            text=f"Just confirming the route: {origin} → {destination}.\nIf that's right, {follow_up}"
         )
 
     @staticmethod

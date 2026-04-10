@@ -80,6 +80,26 @@ class IntentResolver:
                 )
                 return extraction.intent
         
+        # 2.5 Interrupt Menu Numeric / Text Response (In-Workflow Context Only)
+        # The dispatcher renders a plain-text interrupt menu with numbered options:
+        #   1️⃣ Continue  2️⃣ Cancel  3️⃣ Main Menu
+        # These are NOT interactive buttons, so the user types the number or phrase.
+        # Without this mapping, "1"/"2"/"3" resolve as UNKNOWN and loop forever.
+        if current_workflow and message_text:
+            stripped = message_text.strip().lower()
+            if stripped in ("1", "continue"):
+                logger.info("[INTERRUPT_MENU_RESOLVE] choice=%s -> CONTINUE workflow=%s", stripped, current_workflow)
+                if current_workflow == "LOAD_FLOW":
+                    return Intent.CREATE_LOAD
+                if current_workflow == "TRUCK_FLOW":
+                    return Intent.POST_TRUCK
+            elif stripped in ("2", "cancel"):
+                logger.info("[INTERRUPT_MENU_RESOLVE] choice=%s -> CANCEL", stripped)
+                return Intent.CANCEL
+            elif stripped in ("3", "main menu"):
+                logger.info("[INTERRUPT_MENU_RESOLVE] choice=%s -> MAIN_MENU (cancel+reset)", stripped)
+                return Intent.CANCEL
+
         # 3. Heuristic Intent (Corridor & Keyword detection)
         # This layer can push confidence to 1.0 and override LLM UNKNOWN
         heuristic = self._heuristic_resolve_text(

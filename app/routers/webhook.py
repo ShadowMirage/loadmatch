@@ -16,7 +16,6 @@ from app.runtime.whatsapp_adapter import verify_token as get_verify_token
 from app.contracts.meta_intents import INTERRUPT_INTENTS
 
 from app.services.session_manager import (
-    clear_session,
     get_or_create_session,
     get_session_data,
     peek_session,
@@ -33,6 +32,7 @@ from app.services.dispatcher_service import DispatcherService
 from app.services.recovery_service import RecoveryService
 from app.services.event_bus import EventBus
 from app.services import kyc_service
+from app.services.logistics_data import RESOLVER_VERSION
 from app.services.rate_limiter import check as rate_limit_check
 from app.services.whatsapp_service import send_text, safe_fallback
 from app.models.processed_message import ProcessedMessage, WorkflowEvent
@@ -111,6 +111,10 @@ def _mark_failed_after_rollback(db: Session, idem_key: Optional[str]) -> None:
         recovery_db.close()
 
 
+def clear_session(db: Session, phone: str) -> None:
+    StateMachineService.clear_session_and_metadata(db, phone)
+
+
 # ---------------------------------------------------------------------------
 # Webhook verification
 # ---------------------------------------------------------------------------
@@ -141,6 +145,7 @@ async def _phase1_resolve_intent(
     intent_resolver: IntentResolver,
     payload_factory: PayloadFactory,
     idempotency: IdempotencyService,
+    trace_id: str = "",
 ) -> Tuple[Intent, Any, ExtractionResult, Optional[str]]:
     """
     Phase 1: Extraction, normalization, confidence assessment.
@@ -172,9 +177,23 @@ async def _phase1_resolve_intent(
         stored_workflow = getattr(user, "state", None)
 
     reconstructed_workflow = StateMachineService.reconstruct_workflow(stored_workflow, session_data)
+    if not reconstructed_workflow and StateMachineService.should_reconstruct_from_session(stored_workflow, session_data):
+        reconstructed_workflow = StateMachineService.reconstruct_workflow_from_session_data(
+            session_data,
+            preferred_workflow=stored_workflow,
+        )
+        if reconstructed_workflow:
+            logger.warning(
+                "[LIFECYCLE_INVARIANT_VIOLATION]",
+                extra={
+                    "phone": phone,
+                    "stored_workflow": stored_workflow,
+                    "reconstructed_workflow": reconstructed_workflow,
+                },
+            )
     if reconstructed_workflow:
         current_workflow = reconstructed_workflow
-    elif stored_workflow:
+    elif stored_workflow and StateMachineService.workflow_is_active(stored_workflow):
         session_data.clear()
 
     extraction = await extraction_engine.extract(raw_text, user, session_data)
@@ -195,14 +214,82 @@ async def _phase1_resolve_intent(
     else:
         extraction.data = {**effective_session_data, **interaction_data}
     
-    logger.info(f"[MERGED_DATA] intent={intent} merged_data={extraction.data}")
+    merged_data = extraction.data
+    
+    # Normalize aliases BEFORE payload factory
+    raw_weight = merged_data.get("weight")
+    if raw_weight and isinstance(raw_weight, str) and "ton" in raw_weight.lower():
+        import re
+        m = re.search(r'([\d.]+)', raw_weight)
+        if m:
+            merged_data["weight_kg"] = int(float(m.group(1)) * 1000)
+    elif raw_weight:
+        merged_data["weight_kg"] = raw_weight
+
+    raw_cap = merged_data.get("capacity")
+    if raw_cap and isinstance(raw_cap, str) and "ton" in raw_cap.lower():
+        import re
+        m = re.search(r'([\d.]+)', raw_cap)
+        if m:
+            merged_data["capacity_kg"] = int(float(m.group(1)) * 1000)
+    elif raw_cap:
+        merged_data["capacity_kg"] = raw_cap
+
+    from datetime import date, timedelta
+    for dk in ["date", "pickup_date", "departure_date"]:
+        if str(merged_data.get(dk)).strip().lower() == "tomorrow":
+            merged_data[dk] = (date.today() + timedelta(days=1)).isoformat()
+
+    # Preserve resolver_version metadata
+    if "resolver_version" not in merged_data and "resolver_version" in effective_session_data:
+        merged_data["resolver_version"] = effective_session_data["resolver_version"]
+
+    # Keep resolver metadata stable when route authority is present.
+    if (
+        not merged_data.get("resolver_version")
+        and (merged_data.get("lane_key") or (merged_data.get("from_city") and merged_data.get("to_city")))
+    ):
+        merged_data["resolver_version"] = RESOLVER_VERSION
+
+    # Cross-intent quantity alias bridge:
+    # users frequently say "<n> ton" for both load weight and truck capacity.
+    if intent == Intent.CREATE_LOAD and not merged_data.get("weight_kg") and merged_data.get("capacity_kg"):
+        merged_data["weight_kg"] = merged_data.get("capacity_kg")
+    if intent == Intent.POST_TRUCK and not merged_data.get("capacity_kg") and merged_data.get("weight_kg"):
+        merged_data["capacity_kg"] = merged_data.get("weight_kg")
+
+    has_route = bool(merged_data.get("from_city")) and bool(merged_data.get("to_city"))
+    has_weight = bool(merged_data.get("weight_kg"))
+    has_capacity = bool(merged_data.get("capacity_kg"))
+
+    if has_route and intent == Intent.UNKNOWN:
+        if current_workflow == "TRUCK_FLOW":
+            intent = Intent.POST_TRUCK
+        elif current_workflow == "LOAD_FLOW":
+            intent = Intent.CREATE_LOAD
+        elif has_weight and not has_capacity:
+            intent = Intent.CREATE_LOAD
+        elif has_capacity and not has_weight:
+            intent = Intent.POST_TRUCK
+        elif has_weight:
+            intent = Intent.CREATE_LOAD
+        else:
+            intent = Intent.CREATE_LOAD
+
+    # Flow-aware bridge after final intent selection.
+    if intent == Intent.CREATE_LOAD and not merged_data.get("weight_kg") and merged_data.get("capacity_kg"):
+        merged_data["weight_kg"] = merged_data.get("capacity_kg")
+    if intent == Intent.POST_TRUCK and not merged_data.get("capacity_kg") and merged_data.get("weight_kg"):
+        merged_data["capacity_kg"] = merged_data.get("weight_kg")
+
+    logger.info(f"[MERGED_DATA] intent={intent} merged_data={merged_data}")
 
     # Attempt payload construction. If it fails (missing fields), we don't crash.
     # Interrupt intents (GREETING, MENU, UNKNOWN) carry no domain payload — skip build.
     payload = None
     if intent not in INTERRUPT_INTENTS:
         try:
-            payload = payload_factory.build(intent, extraction.data)
+            payload = payload_factory.build(intent, merged_data)
         except Exception as e:
             logger.info(f"Payload validation deferred for {intent.value}: {e}")
             # If we're already in a workflow, stay in it but ask for missing slots
@@ -247,10 +334,48 @@ async def _phase2_atomic_dispatch(
     # Capture current state BEFORE transition for dispatcher context
     current_db_state = getattr(locked_user, "state", "IDLE")
 
+    # Build merged authority surface before transition guards.
+    persisted_session = peek_session(db, phone)
+    persisted_session_data = get_session_data(db, phone, locked_user.id, create=False)
+    persisted_session_data = persisted_session_data if isinstance(persisted_session_data, dict) else {}
+    merge_dispatcher = DispatcherService(db, locked_user.id, phone=phone)
+    merged_data = merge_dispatcher._collect_payload_data(payload)
+    if isinstance(extraction.data, dict):
+        merged_data = {**merged_data, **extraction.data}
+
+    if StateMachineService.should_reconstruct_from_session(current_db_state, persisted_session_data):
+        reconstructed_workflow = StateMachineService.reconstruct_workflow_from_session_data(
+            merged_data,
+            preferred_workflow=getattr(persisted_session, "current_workflow", None),
+        )
+        if reconstructed_workflow:
+            logger.warning(
+                "[LIFECYCLE_INVARIANT_VIOLATION]",
+                extra={
+                    "phone": phone,
+                    "stored_state": current_db_state,
+                    "reconstructed_workflow": reconstructed_workflow,
+                },
+            )
+            current_db_state = reconstructed_workflow
+            locked_user.state = reconstructed_workflow
+
+    transition_reference_time = locked_user.updated_at or datetime.now(timezone.utc)
+    session_updated_at = getattr(persisted_session, "updated_at", None)
+    if (
+        isinstance(session_updated_at, datetime)
+        and (
+            StateMachineService.session_has_workflow_slots(merged_data)
+            or StateMachineService.session_has_workflow_anchors(merged_data)
+        )
+        and session_updated_at > transition_reference_time
+    ):
+        transition_reference_time = session_updated_at
+
     transition = state_machine.transition(
         current_db_state,
         intent,
-        locked_user.updated_at or datetime.now(timezone.utc)
+        transition_reference_time,
     )
 
     if intent not in INTERRUPT_INTENTS and not transition.allowed:
@@ -258,6 +383,9 @@ async def _phase2_atomic_dispatch(
         response = ContractResponse(text=transition.error_message or "⚠️ Action not allowed.")
         # Even on denial, we might want to save data if it was a correction attempt
     else:
+        if intent == Intent.CANCEL:
+            locked_user.state = "IDLE"
+
         # Construct idempotency key (stable across replays)
         idem_key = f"{locked_user.id}:{intent.value}:{wa_id}:{transition.next_state}"
         ranking_context_timestamp = datetime.now(timezone.utc).isoformat()
@@ -336,12 +464,12 @@ async def _phase2_atomic_dispatch(
     # must clear the session buffer, otherwise cancel/confirm paths repopulate
     # stale payload data and the next workflow resumes with old slots.
     if not StateMachineService.workflow_is_active(next_session_workflow):
-        persisted_session_data = get_session_data(db, phone, locked_user.id, create=False)
-        if persisted_session_data:
+        terminal_session_data = get_session_data(db, phone, locked_user.id, create=False)
+        if terminal_session_data:
             leaked_fields = {
-                field: persisted_session_data.get(field)
+                field: terminal_session_data.get(field)
                 for field in StateMachineService.PROVENANCE_FIELDS
-                if persisted_session_data.get(field)
+                if terminal_session_data.get(field)
             }
             if leaked_fields:
                 logger.warning(
@@ -352,7 +480,7 @@ async def _phase2_atomic_dispatch(
                         "leaked_fields": sorted(leaked_fields.keys()),
                     },
                 )
-            StateMachineService.cleanup_terminal_state(persisted_session_data)
+            StateMachineService.cleanup_terminal_state(terminal_session_data)
         clear_session(db, phone)
     else:
         # 4. Universal Session Persistence (Correction Safety)
@@ -504,7 +632,8 @@ async def _process_message(msg: dict, db: Session) -> None:
         # === PHASE 1: Resolve Intent ===
         intent, payload, extraction, current_wf = await _phase1_resolve_intent(
             msg, phone, wa_id, user, db,
-            extraction_engine, intent_resolver, payload_factory, idempotency
+            extraction_engine, intent_resolver, payload_factory, idempotency,
+            trace_id=trace_id,
         )
 
         if intent is None:
