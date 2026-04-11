@@ -59,6 +59,7 @@ CITY_ALIASES: Dict[str, str] = {
     "banglore": "bangalore", "ahmdabad": "ahmedabad",
     "new delhi": "delhi", "ncr": "delhi", "delhi ncr": "delhi",
     "vizag": "visakhapatnam", "bombay": "mumbai", "allahabad": "prayagraj",
+    "pondicherry": "puducherry", "Pondicherry": "puducherry",
     # Map Industrial Zones too
     **INDUSTRIAL_ZONE_ALIASES
 }

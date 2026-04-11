@@ -22,6 +22,7 @@ def test_normalization_integrity():
     assert normalize_hub_name("baroda") == "vadodara"
     assert normalize_hub_name("bombay") == "mumbai"
     assert normalize_hub_name("gurugram") == "gurgaon"
+    assert normalize_hub_name("pondicherry") == "puducherry"
     
     # Direct hub matches
     assert normalize_hub_name("delhi") == "delhi"

@@ -98,6 +98,28 @@ def clear_session(db: Session, phone: str) -> None:
     user_session = peek_session(db, phone)
 
     if user_session:
+        session_data = {}
+        raw = getattr(user_session, "session_data", None)
+        if isinstance(raw, dict):
+            session_data = dict(raw)
+        elif isinstance(raw, str):
+            try:
+                session_data = _json.loads(raw)
+            except Exception:
+                session_data = {}
+
+        for field in (
+            "lane_key",
+            "directional_lane_key",
+            "reverse_directional_lane_key",
+            "lane_class",
+            "corridor_detected",
+            "confidence_source",
+            "corridor_source",
+            "resolver_version",
+        ):
+            session_data.pop(field, None)
+
         user_session.current_workflow = None
         user_session.step_number = 0
         user_session.expected_input = None

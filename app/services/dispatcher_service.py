@@ -21,7 +21,7 @@ from app.models.rating import Rating
 from app.models.truck import Truck
 from app.models.user import User
 from app.models.enums import LoadRequestStatus, ListingStatus, TruckType
-from app.services.logistics_data import normalize_hub_name
+from app.services.logistics_data import normalize_hub_name, RESOLVER_VERSION
 from app.services.load_freshness_service import is_recent_duplicate_load
 from app.services.marketplace_freshness_service import is_recent_duplicate_lane
 from app.services.matching_service import (
@@ -690,11 +690,13 @@ class DispatcherService:
 
         clean_payload = {k: v for k, v in (payload_data or {}).items() if v is not None}
 
-        return {
-            **session_data,
-            **(extraction_data or {}),
-            **clean_payload
-        }
+        merged = {}
+        merged.update(session_data or {})
+        merged.update(extraction_data or {})
+        if "resolver_version" not in merged or not merged.get("resolver_version"):
+            merged["resolver_version"] = (session_data or {}).get("resolver_version") or RESOLVER_VERSION
+        merged.update(clean_payload or {})
+        return merged
 
     @staticmethod
     def _city_label(value: Any) -> str:

@@ -60,6 +60,13 @@ class InternalMonitoringService:
                 db,
                 stale_executing_minutes=self.stale_executing_minutes,
             )
+            if metrics.get("schema_support_status") == "partial":
+                self._last_drift_signature = None
+                logger.info(
+                    "CONSTRAINT_DRIFT_SCHEMA_PARTIAL_SUPPORT",
+                    extra={"schema_support": metrics.get("schema_support")},
+                )
+                return
             if metrics["total_violations"] <= 0:
                 self._last_drift_signature = None
                 return
@@ -131,6 +138,22 @@ class InternalMonitoringService:
         load_has_vehicle_type = "vehicle_type" in load_columns
         load_has_directional_lane_key = "directional_lane_key" in load_columns
         load_has_reverse_directional_lane_key = "reverse_directional_lane_key" in load_columns
+
+        listing_required = {
+            "canonical_lane_key",
+            "vehicle_type",
+            "directional_lane_key",
+            "reverse_directional_lane_key",
+        }
+        load_required = {
+            "canonical_lane_key",
+            "vehicle_type",
+            "directional_lane_key",
+            "reverse_directional_lane_key",
+        }
+        schema_support_status = "full"
+        if not listing_required.issubset(listing_columns) or not load_required.issubset(load_columns):
+            schema_support_status = "partial"
 
         listing_canonical_lane_key_null_count = (
             db.query(TruckSpaceListing)
@@ -248,6 +271,7 @@ class InternalMonitoringService:
             "stale_executing_count": stale_executing_count,
             "request_payload_null_count": request_payload_null_count,
             "total_violations": total_violations,
+            "schema_support_status": schema_support_status,
             "schema_support": {
                 "truck_space_listings": {
                     "canonical_lane_key": listing_has_canonical_lane_key,

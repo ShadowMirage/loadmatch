@@ -14,6 +14,7 @@ class TransitionResult:
     next_state: str
     side_effect: Optional[str] = None
     error_message: Optional[str] = None
+    workflow_expired: bool = False
 
 class StateMachineService:
     ACTIVE_WORKFLOWS = frozenset({
@@ -34,6 +35,9 @@ class StateMachineService:
     PROVENANCE_FIELDS = (
         "lane_key",
         "directional_lane_key",
+        "reverse_directional_lane_key",
+        "lane_class",
+        "corridor_detected",
         "confidence_source",
         "corridor_source",
         "resolver_version",
@@ -44,6 +48,10 @@ class StateMachineService:
         "lane_key",
         "directional_lane_key",
         "reverse_directional_lane_key",
+        "lane_class",
+        "corridor_detected",
+        "confidence_source",
+        "corridor_source",
         "lane_detected_via",
         "resolver_version",
         "ranking_context_timestamp",
@@ -218,12 +226,6 @@ class StateMachineService:
     @classmethod
     def cleanup_terminal_state(cls, session_data: Optional[dict]) -> dict:
         data = session_data if isinstance(session_data, dict) else {}
-        for field in cls.PROVENANCE_FIELDS:
-            if data.get(field):
-                logger.warning(
-                    "[TERMINAL_METADATA_LEAK]",
-                    extra={"field": field},
-                )
         data.clear()
         return data
 
@@ -246,10 +248,6 @@ class StateMachineService:
 
             for field in cls.SESSION_METADATA_CLEAR_FIELDS:
                 if isinstance(session_data, dict) and session_data.get(field) not in (None, ""):
-                    logger.warning(
-                        "[TERMINAL_METADATA_LEAK]",
-                        extra={"field": field},
-                    )
                     session_data.pop(field, None)
 
             if isinstance(session_data, dict) and session_data:
@@ -274,8 +272,10 @@ class StateMachineService:
 
         # 2. TTL Check (Auto-Reset)
         normalized_last_updated = self._as_utc(last_updated)
+        workflow_expired = False
         if normalized_last_updated and datetime.now(timezone.utc) - normalized_last_updated > self.SESSION_TTL:
             logger.info(f"Session expired (State: {state}). Reverting to IDLE.")
+            workflow_expired = self.workflow_is_active(state)
             state = "IDLE"
 
         # 3. Transition Check
@@ -284,16 +284,27 @@ class StateMachineService:
         if intent in allowed_intents:
             next_state = allowed_intents[intent]
             side_effect = self._get_side_effect(state, next_state, intent)
-            return TransitionResult(allowed=True, next_state=next_state, side_effect=side_effect)
+            return TransitionResult(
+                allowed=True,
+                next_state=next_state,
+                side_effect=side_effect,
+                workflow_expired=workflow_expired,
+            )
 
         # Special case: Global intents (Cancel, Main Menu)
         if intent == Intent.CANCEL:
-            return TransitionResult(allowed=True, next_state="IDLE", side_effect="CLEAR_SESSION")
+            return TransitionResult(
+                allowed=True,
+                next_state="IDLE",
+                side_effect="CLEAR_SESSION",
+                workflow_expired=workflow_expired,
+            )
 
         return TransitionResult(
             allowed=False, 
             next_state=state, 
-            error_message="⚠️ This action is not allowed in your current state."
+            error_message="⚠️ This action is not allowed in your current state.",
+            workflow_expired=workflow_expired,
         )
 
     def _get_side_effect(self, from_state: str, to_state: str, intent: Intent) -> Optional[str]:

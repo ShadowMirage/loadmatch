@@ -126,3 +126,27 @@ def test_corridor_source_is_enum(resolver):
     resolver.resolve(extr, None, "IDLE", message_text="delhi to jaipur")
     assert isinstance(extr.data["corridor_source"], CorridorSource)
     assert extr.data["corridor_source"] == CorridorSource.CITY_PAIR
+
+
+def test_interrupt_numeric_requires_interrupt_menu_active_flag(resolver):
+    extr = ExtractionResult(intent=Intent.UNKNOWN, data={}, confidence=0.0, source="TEST", trace_id="t-int-1")
+    intent = resolver.resolve(
+        extr,
+        None,
+        "LOAD_FLOW",
+        message_text="2",
+        interrupt_menu_active=False,
+    )
+    assert intent == Intent.UNKNOWN
+
+
+def test_interrupt_numeric_routes_when_interrupt_menu_active(resolver):
+    extr = ExtractionResult(intent=Intent.UNKNOWN, data={}, confidence=0.0, source="TEST", trace_id="t-int-2")
+    intent = resolver.resolve(
+        extr,
+        None,
+        "TRUCK_FLOW",
+        message_text="1",
+        interrupt_menu_active=True,
+    )
+    assert intent == Intent.POST_TRUCK

@@ -8,6 +8,7 @@ from app.services.logistics_data import (
     get_lane_class, RESOLVER_VERSION
 )
 from app.services.meta_intents import is_greeting
+from app.services.state_machine_service import StateMachineService
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +21,8 @@ class IntentResolver:
         extraction: ExtractionResult, 
         interactive_payload: Optional[Dict[str, Any]], 
         current_workflow: Optional[str],
-        message_text: Optional[str] = ""
+        message_text: Optional[str] = "",
+        interrupt_menu_active: bool = False,
     ) -> Intent:
         """
         3-Input Deterministic Resolver with Stage 4 Confidence Routing.
@@ -85,7 +87,12 @@ class IntentResolver:
         #   1️⃣ Continue  2️⃣ Cancel  3️⃣ Main Menu
         # These are NOT interactive buttons, so the user types the number or phrase.
         # Without this mapping, "1"/"2"/"3" resolve as UNKNOWN and loop forever.
-        if current_workflow and message_text:
+        if (
+            current_workflow
+            and message_text
+            and interrupt_menu_active
+            and StateMachineService.workflow_is_active(current_workflow)
+        ):
             stripped = message_text.strip().lower()
             if stripped in ("1", "continue"):
                 logger.info("[INTERRUPT_MENU_RESOLVE] choice=%s -> CONTINUE workflow=%s", stripped, current_workflow)

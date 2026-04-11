@@ -1336,6 +1336,9 @@ def test_terminal_cleanup_clears_provenance_metadata():
     session_store = {
         "lane_key": "delhi:jaipur",
         "directional_lane_key": "delhi->jaipur",
+        "reverse_directional_lane_key": "jaipur->delhi",
+        "lane_class": "regional_lane",
+        "corridor_detected": True,
         "confidence_source": "corridor_detection",
         "corridor_source": "city_pair",
         "resolver_version": "v3",
@@ -1481,7 +1484,62 @@ def test_phase2_clears_session_context_when_confirm_returns_to_idle():
     mock_set_session_data.assert_not_called()
 
 
-def test_phase2_warns_when_inactive_workflow_retains_lane_key():
+def test_phase2_preserves_slots_when_workflow_expires():
+    db = MagicMock()
+    locked_user = SimpleNamespace(id="user-123", state="LOAD_FLOW", updated_at=None)
+    transition = SimpleNamespace(allowed=True, next_state="IDLE", error_message=None, workflow_expired=True)
+    idempotency = MagicMock()
+    idempotency.start.return_value = SimpleNamespace(id="pm-expired")
+    state_machine = MagicMock()
+    state_machine.transition.return_value = transition
+    extraction = ExtractionResult(
+        intent=Intent.UNKNOWN,
+        data={
+            "from_city": "chennai",
+            "to_city": "mumbai",
+            "weight_kg": 10000,
+        },
+        confidence=1.0,
+        source="TEST",
+        trace_id="trace-expired",
+    )
+
+    async def run():
+        with patch("app.routers.webhook._lock_user_for_dispatch", return_value=locked_user), \
+             patch("app.routers.webhook.get_session_data", return_value={"from_city": "chennai", "weight_kg": 8000}), \
+             patch("app.routers.webhook.get_or_create_session") as mock_get_or_create_session, \
+             patch("app.routers.webhook.set_session_data") as mock_set_session_data, \
+             patch("app.routers.webhook.update_session") as mock_update_session, \
+             patch("app.routers.webhook.clear_session") as mock_clear_session, \
+             patch("app.routers.webhook.DispatcherService.execute", return_value=Response(text="prompt")):
+            response, _, _ = await _phase2_atomic_dispatch(
+                phone="919999999999",
+                wa_id="wamid.expired",
+                db=db,
+                trace_id="trace-expired",
+                intent=Intent.UNKNOWN,
+                payload={"action": "UNKNOWN"},
+                extraction=extraction,
+                idempotency=idempotency,
+                state_machine=state_machine,
+            )
+            return response, mock_get_or_create_session, mock_set_session_data, mock_update_session, mock_clear_session
+
+    response, mock_get_or_create_session, mock_set_session_data, mock_update_session, mock_clear_session = asyncio.run(run())
+
+    assert response.text == "prompt"
+    mock_get_or_create_session.assert_called_once_with(db, "919999999999", "user-123")
+    mock_set_session_data.assert_called_once()
+    mock_update_session.assert_called_once_with(
+        db,
+        "919999999999",
+        {"current_workflow": None},
+        commit=False,
+    )
+    mock_clear_session.assert_not_called()
+
+
+def test_phase2_cleans_inactive_workflow_with_lane_key_without_warning():
     db = MagicMock()
     locked_user = SimpleNamespace(id="user-123", state="TRUCK_FLOW", updated_at=None)
     transition = SimpleNamespace(allowed=True, next_state="IDLE", error_message=None)
@@ -1520,10 +1578,8 @@ def test_phase2_warns_when_inactive_workflow_retains_lane_key():
 
     assert "cancelled" in response.text.lower()
     mock_clear_session.assert_called_once_with(db, "919999999999")
-    warning_messages = [call.args[0] for call in mock_warning.call_args_list]
-    assert "Inactive workflow retained provenance metadata in session_data" in warning_messages
-    state_warning_messages = [call.args[0] for call in mock_state_warning.call_args_list]
-    assert "[TERMINAL_METADATA_LEAK]" in state_warning_messages
+    mock_warning.assert_not_called()
+    mock_state_warning.assert_not_called()
 
 
 def test_phase2_does_not_warn_for_inactive_workflow_without_lane_key():

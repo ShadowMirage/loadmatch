@@ -1,6 +1,7 @@
 import logging
 import dataclasses
 import time
+import re
 from uuid import uuid4
 from datetime import date, datetime, timezone
 from typing import Optional, Tuple, Any
@@ -61,6 +62,19 @@ def _json_safe(value: Any) -> Any:
     if isinstance(value, (date, datetime)):
         return value.isoformat()
     return value
+
+
+def _parse_quantity_kg_from_text(text: str) -> Optional[int]:
+    if not text:
+        return None
+    normalized = str(text).strip().lower()
+    ton_match = re.search(r"(\d+\.?\d*)\s*(?:t|ton|tons)\b", normalized, flags=re.IGNORECASE)
+    if ton_match:
+        return int(float(ton_match.group(1)) * 1000)
+    kg_match = re.search(r"(\d+\.?\d*)\s*(?:kg|kgs|kilo|kilogram|kilograms)\b", normalized, flags=re.IGNORECASE)
+    if kg_match:
+        return int(float(kg_match.group(1)))
+    return None
 
 
 def _extract_messages(body: dict) -> list[dict]:
@@ -170,6 +184,7 @@ async def _phase1_resolve_intent(
     session = peek_session(db, phone)
     session_data = get_session_data(db, phone, user.id, create=False)
     session_data = session_data if isinstance(session_data, dict) else {}
+    interrupt_menu_active = bool(session_data.get("interrupt_menu_active"))
     current_workflow = None
 
     stored_workflow = getattr(session, "current_workflow", None)
@@ -177,31 +192,92 @@ async def _phase1_resolve_intent(
         stored_workflow = getattr(user, "state", None)
 
     reconstructed_workflow = StateMachineService.reconstruct_workflow(stored_workflow, session_data)
-    if not reconstructed_workflow and StateMachineService.should_reconstruct_from_session(stored_workflow, session_data):
-        reconstructed_workflow = StateMachineService.reconstruct_workflow_from_session_data(
-            session_data,
-            preferred_workflow=stored_workflow,
+    reconstruction_aborted = (
+        bool(stored_workflow)
+        and StateMachineService.workflow_is_active(stored_workflow)
+        and not reconstructed_workflow
+        and not StateMachineService.session_has_workflow_slots(session_data)
+        and not StateMachineService.session_has_workflow_anchors(session_data)
+    )
+    if reconstruction_aborted:
+        logger.warning(
+            "[SESSION_RECONSTRUCTION_ABORT_RECOVERY]",
+            extra={"phone": phone, "stored_workflow": stored_workflow},
         )
-        if reconstructed_workflow:
-            logger.warning(
-                "[LIFECYCLE_INVARIANT_VIOLATION]",
-                extra={
-                    "phone": phone,
-                    "stored_workflow": stored_workflow,
-                    "reconstructed_workflow": reconstructed_workflow,
-                },
+        clear_session(db, phone)
+        user.state = "IDLE"
+        session_data = {}
+        interrupt_menu_active = False
+        current_workflow = "IDLE"
+    else:
+        if not reconstructed_workflow and StateMachineService.should_reconstruct_from_session(stored_workflow, session_data):
+            reconstructed_workflow = StateMachineService.reconstruct_workflow_from_session_data(
+                session_data,
+                preferred_workflow=stored_workflow,
             )
-    if reconstructed_workflow:
-        current_workflow = reconstructed_workflow
-    elif stored_workflow and StateMachineService.workflow_is_active(stored_workflow):
-        session_data.clear()
+            if reconstructed_workflow:
+                logger.warning(
+                    "[LIFECYCLE_INVARIANT_VIOLATION]",
+                    extra={
+                        "phone": phone,
+                        "stored_workflow": stored_workflow,
+                        "reconstructed_workflow": reconstructed_workflow,
+                    },
+                )
+        if reconstructed_workflow:
+            current_workflow = reconstructed_workflow
+        elif stored_workflow and StateMachineService.workflow_is_active(stored_workflow):
+            session_data.clear()
 
-    extraction = await extraction_engine.extract(raw_text, user, session_data)
+    # Phase-1 workflow authority sync guard:
+    # normalize non-active workflow markers to IDLE and align with TTL expiry
+    # before resolver intent selection.
+    if current_workflow and not StateMachineService.workflow_is_active(current_workflow):
+        current_workflow = "IDLE"
+        user.state = "IDLE"
+    elif current_workflow and StateMachineService.workflow_is_active(current_workflow):
+        workflow_updated_at = getattr(session, "updated_at", None) or getattr(user, "updated_at", None)
+        if isinstance(workflow_updated_at, datetime):
+            normalized_updated_at = (
+                workflow_updated_at.replace(tzinfo=timezone.utc)
+                if workflow_updated_at.tzinfo is None
+                else workflow_updated_at.astimezone(timezone.utc)
+            )
+            if datetime.now(timezone.utc) - normalized_updated_at > StateMachineService.SESSION_TTL:
+                logger.info(
+                    "[PHASE1_WORKFLOW_EXPIRED] workflow=%s phone=%s",
+                    current_workflow,
+                    phone,
+                )
+                current_workflow = "IDLE"
+                user.state = "IDLE"
+
+    current_workflow = current_workflow or "IDLE"
+    session_data_for_extraction = dict(session_data)
+    session_data_for_extraction["current_workflow"] = current_workflow
+
+    extraction = await extraction_engine.extract(raw_text, user, session_data_for_extraction)
     logger.info(f"[EXTRACTION] intent={extraction.intent} fresh_data={extraction.data}")
-    intent = intent_resolver.resolve(extraction, interactive_payload, current_workflow, message_text=raw_text)
 
-    # Support partial updates (corrections): merge prior session_data with fresh extraction
-    # Fresh extraction keys take priority.
+    # Quantity recovery guard immediately after extraction.
+    extraction_data = extraction.data if isinstance(extraction.data, dict) else {}
+    interactive_action_id = ""
+    if interactive_payload:
+        interactive_action_id = str(interactive_payload.get("id") or "").strip()
+        interactive_action_title = str(interactive_payload.get("title") or "").strip()
+        if interactive_action_id:
+            extraction_data = {
+                **extraction_data,
+                "interactive_action_id": interactive_action_id,
+                "interactive_action_title": interactive_action_title,
+            }
+    parsed_qty_kg = _parse_quantity_kg_from_text(raw_text)
+    if parsed_qty_kg:
+        extraction_data.setdefault("weight_kg", parsed_qty_kg)
+        extraction_data.setdefault("capacity_kg", parsed_qty_kg)
+    extraction.data = extraction_data
+
+    # Support partial updates (corrections): merge prior session_data with fresh extraction.
     effective_session_data = session_data if isinstance(session_data, dict) else {}
     interaction_data = {}
     if interactive_payload:
@@ -209,17 +285,11 @@ async def _phase1_resolve_intent(
             "interactive_action_id": interactive_payload.get("id"),
             "interactive_action_title": interactive_payload.get("title"),
         }
-    if extraction.data:
-        extraction.data = {**effective_session_data, **interaction_data, **extraction.data}
-    else:
-        extraction.data = {**effective_session_data, **interaction_data}
-    
-    merged_data = extraction.data
-    
-    # Normalize aliases BEFORE payload factory
+    merged_data = {**effective_session_data, **interaction_data, **extraction_data}
+
+    # Normalize aliases BEFORE intent resolution and payload factory.
     raw_weight = merged_data.get("weight")
     if raw_weight and isinstance(raw_weight, str) and "ton" in raw_weight.lower():
-        import re
         m = re.search(r'([\d.]+)', raw_weight)
         if m:
             merged_data["weight_kg"] = int(float(m.group(1)) * 1000)
@@ -228,60 +298,87 @@ async def _phase1_resolve_intent(
 
     raw_cap = merged_data.get("capacity")
     if raw_cap and isinstance(raw_cap, str) and "ton" in raw_cap.lower():
-        import re
         m = re.search(r'([\d.]+)', raw_cap)
         if m:
             merged_data["capacity_kg"] = int(float(m.group(1)) * 1000)
     elif raw_cap:
         merged_data["capacity_kg"] = raw_cap
 
+    # Raw-text quantity fallback when extraction/session alias fields are missing.
+    if not merged_data.get("weight_kg") and not merged_data.get("capacity_kg"):
+        qty_kg = _parse_quantity_kg_from_text(raw_text)
+        if qty_kg:
+            merged_data["weight_kg"] = qty_kg
+            merged_data["capacity_kg"] = qty_kg
+
     from datetime import date, timedelta
     for dk in ["date", "pickup_date", "departure_date"]:
         if str(merged_data.get(dk)).strip().lower() == "tomorrow":
             merged_data[dk] = (date.today() + timedelta(days=1)).isoformat()
 
-    # Preserve resolver_version metadata
-    if "resolver_version" not in merged_data and "resolver_version" in effective_session_data:
-        merged_data["resolver_version"] = effective_session_data["resolver_version"]
+    if not merged_data.get("resolver_version"):
+        merged_data["resolver_version"] = effective_session_data.get("resolver_version") or RESOLVER_VERSION
 
-    # Keep resolver metadata stable when route authority is present.
-    if (
-        not merged_data.get("resolver_version")
-        and (merged_data.get("lane_key") or (merged_data.get("from_city") and merged_data.get("to_city")))
-    ):
-        merged_data["resolver_version"] = RESOLVER_VERSION
+    extraction.data = merged_data
+    intent = intent_resolver.resolve(
+        extraction,
+        interactive_payload,
+        current_workflow,
+        message_text=raw_text,
+        interrupt_menu_active=interrupt_menu_active,
+    )
 
-    # Cross-intent quantity alias bridge:
-    # users frequently say "<n> ton" for both load weight and truck capacity.
-    if intent == Intent.CREATE_LOAD and not merged_data.get("weight_kg") and merged_data.get("capacity_kg"):
-        merged_data["weight_kg"] = merged_data.get("capacity_kg")
-    if intent == Intent.POST_TRUCK and not merged_data.get("capacity_kg") and merged_data.get("weight_kg"):
-        merged_data["capacity_kg"] = merged_data.get("weight_kg")
+    interactive_action_id_norm = str(merged_data.get("interactive_action_id") or "").upper()
+    if interactive_action_id_norm in {"POST_TRUCK", "START_TRUCK"}:
+        intent = Intent.POST_TRUCK
+    elif interactive_action_id_norm in {"FIND_TRUCK", "POST_LOAD"}:
+        intent = Intent.CREATE_LOAD
+
+    # Workflow-aware intent correction guard.
+    if current_workflow == "TRUCK_FLOW" and intent == Intent.CREATE_LOAD:
+        intent = Intent.POST_TRUCK
+    if current_workflow == "LOAD_FLOW" and intent == Intent.POST_TRUCK:
+        intent = Intent.CREATE_LOAD
 
     has_route = bool(merged_data.get("from_city")) and bool(merged_data.get("to_city"))
     has_weight = bool(merged_data.get("weight_kg"))
     has_capacity = bool(merged_data.get("capacity_kg"))
 
-    if has_route and intent == Intent.UNKNOWN:
-        if current_workflow == "TRUCK_FLOW":
+    if (
+        intent in {Intent.CREATE_LOAD, Intent.POST_TRUCK}
+        and has_route
+        and not (has_weight or has_capacity)
+        and current_workflow == "IDLE"
+    ):
+        intent = Intent.UNKNOWN
+
+    # Route-only promotion protection.
+    if intent == Intent.UNKNOWN and has_route:
+        if not (has_weight or has_capacity):
+            intent = Intent.UNKNOWN
+        elif current_workflow == "TRUCK_FLOW":
             intent = Intent.POST_TRUCK
         elif current_workflow == "LOAD_FLOW":
             intent = Intent.CREATE_LOAD
-        elif has_weight and not has_capacity:
-            intent = Intent.CREATE_LOAD
         elif has_capacity and not has_weight:
             intent = Intent.POST_TRUCK
-        elif has_weight:
-            intent = Intent.CREATE_LOAD
         else:
             intent = Intent.CREATE_LOAD
 
-    # Flow-aware bridge after final intent selection.
-    if intent == Intent.CREATE_LOAD and not merged_data.get("weight_kg") and merged_data.get("capacity_kg"):
-        merged_data["weight_kg"] = merged_data.get("capacity_kg")
-    if intent == Intent.POST_TRUCK and not merged_data.get("capacity_kg") and merged_data.get("weight_kg"):
-        merged_data["capacity_kg"] = merged_data.get("weight_kg")
+    # Session continuity safety net when extractor fails.
+    if intent == Intent.UNKNOWN and effective_session_data:
+        if effective_session_data.get("from_city") and effective_session_data.get("to_city"):
+            intent = Intent.CREATE_LOAD
 
+    # Final payload boundary alias symmetry gate.
+    if intent == Intent.CREATE_LOAD and merged_data.get("capacity_kg") and not merged_data.get("weight_kg"):
+        merged_data["weight_kg"] = merged_data["capacity_kg"]
+    if intent == Intent.POST_TRUCK and merged_data.get("weight_kg") and not merged_data.get("capacity_kg"):
+        merged_data["capacity_kg"] = merged_data["weight_kg"]
+    if not merged_data.get("resolver_version"):
+        merged_data["resolver_version"] = RESOLVER_VERSION
+
+    extraction.data = merged_data
     logger.info(f"[MERGED_DATA] intent={intent} merged_data={merged_data}")
 
     # Attempt payload construction. If it fails (missing fields), we don't crash.
@@ -460,28 +557,35 @@ async def _phase2_atomic_dispatch(
                 response = None
 
     next_session_workflow = getattr(locked_user, "state", "IDLE")
+    workflow_expired = bool(getattr(transition, "workflow_expired", False))
+
+    interrupt_menu_open = (
+        StateMachineService.workflow_is_active(next_session_workflow)
+        and intent in {Intent.GREETING, Intent.UNKNOWN, Intent.MENU}
+    )
+    if isinstance(extraction.data, dict):
+        extraction.data["interrupt_menu_active"] = interrupt_menu_open
+
     # Preserve slot state only while a workflow remains active. IDLE transitions
     # must clear the session buffer, otherwise cancel/confirm paths repopulate
     # stale payload data and the next workflow resumes with old slots.
     if not StateMachineService.workflow_is_active(next_session_workflow):
-        terminal_session_data = get_session_data(db, phone, locked_user.id, create=False)
-        if terminal_session_data:
-            leaked_fields = {
-                field: terminal_session_data.get(field)
-                for field in StateMachineService.PROVENANCE_FIELDS
-                if terminal_session_data.get(field)
-            }
-            if leaked_fields:
-                logger.warning(
-                    "Inactive workflow retained provenance metadata in session_data",
-                    extra={
-                        "phone": phone,
-                        "workflow": next_session_workflow,
-                        "leaked_fields": sorted(leaked_fields.keys()),
-                    },
-                )
-            StateMachineService.cleanup_terminal_state(terminal_session_data)
-        clear_session(db, phone)
+        if workflow_expired and intent not in {Intent.CANCEL, Intent.CONFIRM}:
+            # TTL should expire workflow state, not erase collected slots.
+            get_or_create_session(db, phone, locked_user.id)
+            if isinstance(extraction.data, dict):
+                set_session_data(db, phone, locked_user.id, extraction.data)
+            update_session(
+                db,
+                phone,
+                {"current_workflow": None},
+                commit=False,
+            )
+        else:
+            terminal_session_data = get_session_data(db, phone, locked_user.id, create=False)
+            if terminal_session_data:
+                StateMachineService.cleanup_terminal_state(terminal_session_data)
+            clear_session(db, phone)
     else:
         # 4. Universal Session Persistence (Correction Safety)
         # We save session data even if dispatch was skipped/denied to preserve conversational context.

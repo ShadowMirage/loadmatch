@@ -1,10 +1,12 @@
 import asyncio
 import contextlib
+import hashlib
 import logging
 import os
 import random
 import time
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import FastAPI
@@ -69,6 +71,25 @@ for name in (
     logging.getLogger(name).propagate = True
 
 logger = logging.getLogger(__name__)
+
+
+def _compute_build_hash() -> str:
+    env_hash = os.getenv("BUILD_HASH")
+    if env_hash:
+        return env_hash
+    try:
+        app_root = Path(__file__).resolve().parent
+        latest_mtime = max(
+            int(path.stat().st_mtime)
+            for path in app_root.rglob("*.py")
+        )
+        digest = hashlib.sha1(str(latest_mtime).encode("utf-8")).hexdigest()[:12]
+        return f"auto-{digest}"
+    except Exception:
+        return f"boot-{int(time.time())}"
+
+
+BUILD_HASH = _compute_build_hash()
 
 
 class SecretFilter(logging.Filter):
@@ -239,6 +260,7 @@ async def _leadership_watchdog(app: FastAPI):
 async def lifespan(app: FastAPI):
     _configure_logging()
     logger.info("Starting LoadMatch application.")
+    logger.info("WORKER_BOOT_HASH=%s", BUILD_HASH)
 
     app.state.executor = ThreadPoolExecutor(max_workers=64)
     logger.info("ThreadPoolExecutor(max_workers=64) attached to app.state.executor")
@@ -396,6 +418,7 @@ async def liquidity_health():
 async def constraint_drift():
     snapshot = {
         "status": "ok",
+        "schema_support": "full",
         "canonical_lane_key_null_rows": 0,
         "vehicle_type_null_rows": 0,
         "duplicate_active_listings": 0,
@@ -431,10 +454,13 @@ async def constraint_drift():
                 "stale_executing_messages": int(metrics.get("stale_executing_count", 0)),
                 "request_payload_null_rows": int(metrics.get("request_payload_null_count", 0)),
                 "total_violations": int(metrics.get("total_violations", 0)),
+                "schema_support": metrics.get("schema_support_status", "full"),
                 "raw_metrics": metrics,
             }
         )
-        if snapshot["total_violations"] > 0:
+        if snapshot["schema_support"] == "partial":
+            snapshot["status"] = "ok"
+        elif snapshot["total_violations"] > 0:
             snapshot["status"] = "drift_detected"
     except Exception:
         snapshot["status"] = "degraded"
