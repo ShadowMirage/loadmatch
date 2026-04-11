@@ -407,3 +407,118 @@ def test_truck_flow_corrects_extracted_create_load_intent_to_post_truck():
     assert intent == Intent.POST_TRUCK
     assert extraction.data["capacity_kg"] == 10000
     assert isinstance(payload, PostTruckPayload)
+
+
+def test_truck_flow_promotes_date_slot_and_sanitizes_relative_plate_alias():
+    async def run():
+        msg = {"type": "text", "text": {"body": "agra to delhi 4 ton tomorrow"}}
+        user = SimpleNamespace(id="user-123", state="TRUCK_FLOW")
+        extraction_engine = _StubExtractionEngine(
+            ExtractionResult(
+                intent=Intent.UNKNOWN,
+                data={"plate": "tomorrow"},
+                confidence=0.0,
+                source="TEST",
+                trace_id="trace-truck-date-promotion",
+            )
+        )
+        resolver = IntentResolver()
+        factory = PayloadFactory()
+        idempotency = MagicMock()
+        idempotency.fetch_cached_intent_data.return_value = None
+
+        with patch("app.routers.webhook.peek_session", return_value=SimpleNamespace(current_workflow="TRUCK_FLOW")), \
+             patch("app.routers.webhook.get_session_data", return_value={"resolver_version": "v-test"}):
+            return await _phase1_resolve_intent(
+                msg=msg,
+                phone="919999999999",
+                wa_id="wamid.truck-date-promotion",
+                user=user,
+                db=MagicMock(),
+                extraction_engine=extraction_engine,
+                intent_resolver=resolver,
+                payload_factory=factory,
+                idempotency=idempotency,
+            )
+
+    intent, payload, extraction, current_workflow = asyncio.run(run())
+
+    assert current_workflow == "TRUCK_FLOW"
+    assert intent == Intent.POST_TRUCK
+    assert extraction.data["from_city"] == "agra"
+    assert extraction.data["to_city"] == "delhi"
+    assert extraction.data["capacity_kg"] == 4000
+    assert extraction.data["departure_date"]
+    assert "date" not in extraction.data
+    assert "plate" not in extraction.data
+    assert isinstance(payload, PostTruckPayload)
+
+
+def test_load_confirm_correction_retains_load_authority_and_pickup_date():
+    session_store = {"resolver_version": "v-test"}
+
+    async def resolve_message(message_text: str, workflow: str, extraction_result: ExtractionResult):
+        msg = {"type": "text", "text": {"body": message_text}}
+        user = SimpleNamespace(id="user-123", state=workflow)
+        extraction_engine = _StubExtractionEngine(extraction_result)
+        resolver = IntentResolver()
+        factory = PayloadFactory()
+        idempotency = MagicMock()
+        idempotency.fetch_cached_intent_data.return_value = None
+
+        with patch("app.routers.webhook.peek_session", return_value=SimpleNamespace(current_workflow=workflow)), \
+             patch("app.routers.webhook.get_session_data", return_value=dict(session_store)):
+            intent, payload, extraction, current_workflow = await _phase1_resolve_intent(
+                msg=msg,
+                phone="919999999999",
+                wa_id=f"wamid.{message_text}",
+                user=user,
+                db=MagicMock(),
+                extraction_engine=extraction_engine,
+                intent_resolver=resolver,
+                payload_factory=factory,
+                idempotency=idempotency,
+            )
+            session_store.update(extraction.data)
+            return intent, payload, extraction, current_workflow
+
+    initial_intent, initial_payload, initial_extraction, current_workflow = asyncio.run(
+        resolve_message(
+            "agra to delhi 3 ton tomorrow",
+            "LOAD_FLOW",
+            ExtractionResult(
+                intent=Intent.UNKNOWN,
+                data={},
+                confidence=0.0,
+                source="TEST",
+                trace_id="trace-load-smoke-initial",
+            ),
+        )
+    )
+
+    corrected_intent, corrected_payload, corrected_extraction, current_workflow = asyncio.run(
+        resolve_message(
+            "actually 5 ton",
+            "LOAD_CONFIRM",
+            ExtractionResult(
+                intent=Intent.UNKNOWN,
+                data={"weight_kg": 5000},
+                confidence=0.4,
+                source="TEST",
+                trace_id="trace-load-smoke-correction",
+            ),
+        )
+    )
+
+    assert initial_intent == Intent.CREATE_LOAD
+    assert isinstance(initial_payload, CreateLoadPayload)
+    assert initial_extraction.data["pickup_date"]
+    assert "date" not in initial_extraction.data
+
+    assert current_workflow == "LOAD_CONFIRM"
+    assert corrected_intent == Intent.CREATE_LOAD
+    assert isinstance(corrected_payload, CreateLoadPayload)
+    assert corrected_extraction.data["weight_kg"] == 5000
+    assert corrected_extraction.data["pickup_date"] == initial_extraction.data["pickup_date"]
+    assert corrected_payload.weight_kg == 5000
+    assert corrected_payload.pickup_date is not None

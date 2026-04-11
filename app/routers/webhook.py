@@ -33,6 +33,7 @@ from app.services.dispatcher_service import DispatcherService
 from app.services.recovery_service import RecoveryService
 from app.services.event_bus import EventBus
 from app.services import kyc_service
+from app.services.date_parser import normalize_date
 from app.services.logistics_data import RESOLVER_VERSION
 from app.services.rate_limiter import check as rate_limit_check
 from app.services.whatsapp_service import send_text, safe_fallback
@@ -44,6 +45,12 @@ from app.contracts.enums import Intent
 
 logger = logging.getLogger("loadmatch.webhook")
 router = APIRouter(prefix="/webhook", tags=["Webhook"])
+_TRUCK_PLATE_PATTERN = re.compile(r"^[A-Z]{2}\d{1,2}[A-Z]{1,3}\d{4}$")
+_DATE_SEARCH_PATTERNS = (
+    re.compile(r"\b(today|tomorrow)\b", flags=re.IGNORECASE),
+    re.compile(r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b"),
+    re.compile(r"\b\d{4}[/-]\d{1,2}[/-]\d{1,2}\b"),
+)
 
 
 class AtomicDispatchError(RuntimeError):
@@ -74,6 +81,102 @@ def _parse_quantity_kg_from_text(text: str) -> Optional[int]:
     kg_match = re.search(r"(\d+\.?\d*)\s*(?:kg|kgs|kilo|kilogram|kilograms)\b", normalized, flags=re.IGNORECASE)
     if kg_match:
         return int(float(kg_match.group(1)))
+    return None
+
+
+def _normalize_date_value(value: Any) -> Optional[str]:
+    if value in (None, ""):
+        return None
+    if isinstance(value, datetime):
+        return value.date().strftime("%d-%m-%Y")
+    if isinstance(value, date):
+        return value.strftime("%d-%m-%Y")
+
+    normalized = normalize_date(str(value).strip())
+    return normalized or None
+
+
+def _parse_date_from_text(text: str) -> Optional[str]:
+    if not text:
+        return None
+
+    raw_text = str(text).strip()
+    for pattern in _DATE_SEARCH_PATTERNS:
+        match = pattern.search(raw_text)
+        if match:
+            normalized = _normalize_date_value(match.group(0))
+            if normalized:
+                return normalized
+    return None
+
+
+def _looks_like_truck_plate(value: Any) -> bool:
+    if value in (None, ""):
+        return False
+    normalized = re.sub(r"\s+", "", str(value).upper())
+    return bool(_TRUCK_PLATE_PATTERN.fullmatch(normalized))
+
+
+def _sanitize_plate_alias(data: dict) -> dict:
+    if not isinstance(data, dict):
+        return {}
+
+    plate_value = data.get("plate")
+    if plate_value in (None, ""):
+        return data
+
+    normalized_plate_date = _normalize_date_value(plate_value)
+    if normalized_plate_date and not _looks_like_truck_plate(plate_value):
+        data.setdefault("date", normalized_plate_date)
+        data.pop("plate", None)
+        return data
+
+    if data.get("date") and not _looks_like_truck_plate(plate_value):
+        data.pop("plate", None)
+
+    return data
+
+
+def _canonicalize_workflow_slots(data: dict, intent: Intent) -> dict:
+    if not isinstance(data, dict):
+        return {}
+
+    normalized = dict(data)
+    normalized = _sanitize_plate_alias(normalized)
+
+    for date_key in ("date", "pickup_date", "departure_date"):
+        normalized_date = _normalize_date_value(normalized.get(date_key))
+        if normalized_date:
+            normalized[date_key] = normalized_date
+
+    if intent == Intent.CREATE_LOAD:
+        if normalized.get("capacity_kg") and not normalized.get("weight_kg"):
+            normalized["weight_kg"] = normalized["capacity_kg"]
+        if normalized.get("date") and not normalized.get("pickup_date"):
+            normalized["pickup_date"] = normalized["date"]
+        normalized.pop("departure_date", None)
+        normalized.pop("date", None)
+    elif intent == Intent.POST_TRUCK:
+        if normalized.get("from_city") and not normalized.get("current_city"):
+            normalized["current_city"] = normalized["from_city"]
+        if normalized.get("weight_kg") and not normalized.get("capacity_kg"):
+            normalized["capacity_kg"] = normalized["weight_kg"]
+        if normalized.get("date") and not normalized.get("departure_date"):
+            normalized["departure_date"] = normalized["date"]
+        normalized.pop("pickup_date", None)
+        normalized.pop("date", None)
+
+    normalized.pop("weight", None)
+    normalized.pop("capacity", None)
+    return normalized
+
+
+def _workflow_family(workflow: Optional[str]) -> Optional[str]:
+    normalized = str(workflow or "").upper()
+    if normalized.startswith("LOAD_"):
+        return "load"
+    if normalized.startswith("TRUCK_"):
+        return "truck"
     return None
 
 
@@ -275,6 +378,10 @@ async def _phase1_resolve_intent(
     if parsed_qty_kg:
         extraction_data.setdefault("weight_kg", parsed_qty_kg)
         extraction_data.setdefault("capacity_kg", parsed_qty_kg)
+    parsed_date = _parse_date_from_text(raw_text)
+    if parsed_date and not any(extraction_data.get(key) for key in ("date", "pickup_date", "departure_date")):
+        extraction_data["date"] = parsed_date
+    extraction_data = _sanitize_plate_alias(extraction_data)
     extraction.data = extraction_data
 
     # Support partial updates (corrections): merge prior session_data with fresh extraction.
@@ -311,10 +418,17 @@ async def _phase1_resolve_intent(
             merged_data["weight_kg"] = qty_kg
             merged_data["capacity_kg"] = qty_kg
 
-    from datetime import date, timedelta
-    for dk in ["date", "pickup_date", "departure_date"]:
-        if str(merged_data.get(dk)).strip().lower() == "tomorrow":
-            merged_data[dk] = (date.today() + timedelta(days=1)).isoformat()
+    for date_key in ("date", "pickup_date", "departure_date"):
+        normalized_date = _normalize_date_value(merged_data.get(date_key))
+        if normalized_date:
+            merged_data[date_key] = normalized_date
+
+    if not any(merged_data.get(key) for key in ("date", "pickup_date", "departure_date")):
+        parsed_date = _parse_date_from_text(raw_text)
+        if parsed_date:
+            merged_data["date"] = parsed_date
+
+    merged_data = _sanitize_plate_alias(merged_data)
 
     if not merged_data.get("resolver_version"):
         merged_data["resolver_version"] = effective_session_data.get("resolver_version") or RESOLVER_VERSION
@@ -334,10 +448,12 @@ async def _phase1_resolve_intent(
     elif interactive_action_id_norm in {"FIND_TRUCK", "POST_LOAD"}:
         intent = Intent.CREATE_LOAD
 
+    workflow_family = _workflow_family(current_workflow)
+
     # Workflow-aware intent correction guard.
-    if current_workflow == "TRUCK_FLOW" and intent == Intent.CREATE_LOAD:
+    if workflow_family == "truck" and intent == Intent.CREATE_LOAD:
         intent = Intent.POST_TRUCK
-    if current_workflow == "LOAD_FLOW" and intent == Intent.POST_TRUCK:
+    if workflow_family == "load" and intent == Intent.POST_TRUCK:
         intent = Intent.CREATE_LOAD
 
     has_route = bool(merged_data.get("from_city")) and bool(merged_data.get("to_city"))
@@ -356,9 +472,9 @@ async def _phase1_resolve_intent(
     if intent == Intent.UNKNOWN and has_route:
         if not (has_weight or has_capacity):
             intent = Intent.UNKNOWN
-        elif current_workflow == "TRUCK_FLOW":
+        elif workflow_family == "truck":
             intent = Intent.POST_TRUCK
-        elif current_workflow == "LOAD_FLOW":
+        elif workflow_family == "load":
             intent = Intent.CREATE_LOAD
         elif has_capacity and not has_weight:
             intent = Intent.POST_TRUCK
@@ -370,11 +486,8 @@ async def _phase1_resolve_intent(
         if effective_session_data.get("from_city") and effective_session_data.get("to_city"):
             intent = Intent.CREATE_LOAD
 
-    # Final payload boundary alias symmetry gate.
-    if intent == Intent.CREATE_LOAD and merged_data.get("capacity_kg") and not merged_data.get("weight_kg"):
-        merged_data["weight_kg"] = merged_data["capacity_kg"]
-    if intent == Intent.POST_TRUCK and merged_data.get("weight_kg") and not merged_data.get("capacity_kg"):
-        merged_data["capacity_kg"] = merged_data["weight_kg"]
+    # Final payload boundary canonicalization gate.
+    merged_data = _canonicalize_workflow_slots(merged_data, intent)
     if not merged_data.get("resolver_version"):
         merged_data["resolver_version"] = RESOLVER_VERSION
 

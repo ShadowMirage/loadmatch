@@ -693,9 +693,14 @@ class DispatcherService:
         merged = {}
         merged.update(session_data or {})
         merged.update(extraction_data or {})
-        if "resolver_version" not in merged or not merged.get("resolver_version"):
-            merged["resolver_version"] = (session_data or {}).get("resolver_version") or RESOLVER_VERSION
         merged.update(clean_payload or {})
+        if not merged.get("resolver_version"):
+            merged["resolver_version"] = (
+                clean_payload.get("resolver_version")
+                or (extraction_data or {}).get("resolver_version")
+                or (session_data or {}).get("resolver_version")
+                or RESOLVER_VERSION
+            )
         return merged
 
     @staticmethod

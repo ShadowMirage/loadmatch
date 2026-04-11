@@ -158,3 +158,31 @@ def test_dispatcher_logs_authority_drift_when_session_and_extraction_disagree():
 
     warning_messages = [call.args[0] for call in mock_warning.call_args_list]
     assert "AUTHORITY_DRIFT_DETECTED" in warning_messages
+
+
+def test_dispatcher_merge_prefers_extraction_over_stale_session_slots():
+    extraction_data = {
+        "from_city": "agra",
+        "to_city": "delhi",
+        "capacity_kg": 4000,
+        "departure_date": "12-04-2026",
+        "resolver_version": "v-fresh",
+    }
+    dispatcher = DispatcherService(MagicMock(), user_id="user-123", phone="919999999999")
+    payload = PayloadFactory().build(Intent.POST_TRUCK, extraction_data)
+
+    with patch(
+        "app.services.dispatcher_service.get_session_data",
+        return_value={
+            "from_city": "agra",
+            "to_city": "delhi",
+            "capacity_kg": 2000,
+            "departure_date": "11-04-2026",
+            "resolver_version": "v-stale",
+        },
+    ):
+        merged = dispatcher._collect_payload_data(payload)
+
+    assert merged["capacity_kg"] == 4000
+    assert merged["departure_date"] == "12-04-2026"
+    assert merged["resolver_version"] == "v-fresh"
