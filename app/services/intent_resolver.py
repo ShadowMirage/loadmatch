@@ -115,6 +115,15 @@ class IntentResolver:
                 logger.info("[INTERRUPT_MENU_RESOLVE] choice=%s -> MAIN_MENU (cancel+reset)", stripped)
                 return Intent.CANCEL
 
+        if message_text and (not current_workflow or current_workflow == "IDLE"):
+            stripped = message_text.strip().lower()
+            if stripped == "1":
+                return Intent.CREATE_LOAD
+            if stripped == "2":
+                return Intent.POST_TRUCK
+            if stripped == "3":
+                return Intent.UPLOAD_KYC
+
         # 3. Heuristic Intent (Corridor & Keyword detection)
         # This layer can push confidence to 1.0 and override LLM UNKNOWN
         heuristic = self._heuristic_resolve_text(

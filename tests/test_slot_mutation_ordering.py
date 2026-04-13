@@ -622,3 +622,43 @@ def test_session_promoted_slots_get_session_fallback_confidence_source():
     assert isinstance(payload, CreateLoadPayload)
     assert extraction.data["confidence_source"] == "session_fallback"
     assert extraction.data["pickup_date"] == "14-04-2026"
+
+
+def test_raw_text_textual_date_promotes_to_pickup_date_before_prompting():
+    async def run():
+        msg = {"type": "text", "text": {"body": "agra to delhi 5 ton 15 april 2026"}}
+        user = SimpleNamespace(id="user-123", state="LOAD_FLOW")
+        extraction_engine = _StubExtractionEngine(
+            ExtractionResult(
+                intent=Intent.UNKNOWN,
+                data={},
+                confidence=0.0,
+                source="TEST",
+                trace_id="trace-textual-date",
+            )
+        )
+        resolver = IntentResolver()
+        factory = PayloadFactory()
+        idempotency = MagicMock()
+        idempotency.fetch_cached_intent_data.return_value = None
+
+        with patch("app.routers.webhook.peek_session", return_value=SimpleNamespace(current_workflow="LOAD_FLOW")), \
+             patch("app.routers.webhook.get_session_data", return_value={"resolver_version": "v-test"}):
+            return await _phase1_resolve_intent(
+                msg=msg,
+                phone="919999999999",
+                wa_id="wamid.textual.date",
+                user=user,
+                db=MagicMock(),
+                extraction_engine=extraction_engine,
+                intent_resolver=resolver,
+                payload_factory=factory,
+                idempotency=idempotency,
+            )
+
+    intent, payload, extraction, _ = asyncio.run(run())
+
+    assert intent == Intent.CREATE_LOAD
+    assert isinstance(payload, CreateLoadPayload)
+    assert extraction.data["pickup_date"] == "15-04-2026"
+    assert "date" not in extraction.data

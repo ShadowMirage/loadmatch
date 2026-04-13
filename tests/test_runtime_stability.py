@@ -2,6 +2,7 @@ import asyncio
 from datetime import date, datetime
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
+from zoneinfo import ZoneInfo
 
 from app.contracts.responses import Response, coerce_response
 from app.contracts.enums import Intent
@@ -16,6 +17,7 @@ from app.services.dispatcher_service import DispatcherService
 from app.services.extraction_engine import ExtractionResult
 from app.services.intent_resolver import IntentResolver
 from app.services.logistics_data import RESOLVER_VERSION
+from app.services.date_parser import extract_first_date, normalize_date
 from app.routers.webhook import _extract_messages, _phase2_atomic_dispatch
 from app.services.recovery_daemon import RecoveryDaemon
 from app.services.recovery_service import DeliveryResult, RecoveryService
@@ -157,6 +159,31 @@ def test_send_with_backoff_returns_false_when_send_raises():
             )
 
     assert asyncio.run(run()) == DeliveryResult.FAILED
+
+
+def test_normalize_date_uses_india_local_relative_base():
+    with patch(
+        "app.services.date_parser._relative_base_now",
+        return_value=datetime(2026, 4, 13, 10, 0, tzinfo=ZoneInfo("Asia/Kolkata")),
+    ):
+        assert normalize_date("day after tomorrow") == "15-04-2026"
+
+
+def test_extract_first_date_finds_textual_month_date_in_message():
+    with patch(
+        "app.services.date_parser._relative_base_now",
+        return_value=datetime(2026, 4, 13, 10, 0, tzinfo=ZoneInfo("Asia/Kolkata")),
+    ):
+        assert extract_first_date("Agra to Delhi 15 April 2026 5 ton") == "15-04-2026"
+
+
+def test_dispatcher_coerce_date_uses_shared_normalization_for_relative_dates():
+    dispatcher = DispatcherService(MagicMock(), user_id="user-123")
+    with patch(
+        "app.services.date_parser._relative_base_now",
+        return_value=datetime(2026, 4, 13, 10, 0, tzinfo=ZoneInfo("Asia/Kolkata")),
+    ):
+        assert dispatcher._coerce_date("day after tomorrow").isoformat() == "2026-04-15"
 
 
 def test_send_with_backoff_skips_sandbox_block_without_retry_loop():
@@ -313,6 +340,21 @@ def test_intent_resolver_maps_rating_and_booking_actions():
     assert resolver.resolve(extraction, {"id": "CONTACT_DRIVER_BKG123"}, None) == Intent.CONTACT_DRIVER
     assert resolver.resolve(extraction, {"id": "CONFIRM_BOOKING_BKG123"}, None) == Intent.CONFIRM_BOOKING
     assert resolver.resolve(extraction, {"id": "CANCEL_BOOKING_BKG123"}, None) == Intent.CANCEL
+
+
+def test_intent_resolver_maps_numeric_main_menu_choices_in_idle():
+    resolver = IntentResolver()
+    extraction = ExtractionResult(
+        intent=Intent.UNKNOWN,
+        data={},
+        confidence=0.0,
+        source="REGEX",
+        trace_id="trace-main-menu-numeric",
+    )
+
+    assert resolver.resolve(extraction, None, "IDLE", message_text="1") == Intent.CREATE_LOAD
+    assert resolver.resolve(extraction, None, "IDLE", message_text="2") == Intent.POST_TRUCK
+    assert resolver.resolve(extraction, None, "IDLE", message_text="3") == Intent.UPLOAD_KYC
 
 
 def test_extract_messages_flattens_batched_webhook_payload():

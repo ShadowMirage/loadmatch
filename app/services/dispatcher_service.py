@@ -4,7 +4,6 @@ import re
 from typing import Any, Optional
 from datetime import date, datetime, timezone
 
-import dateparser
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -32,6 +31,7 @@ from app.services.matching_service import (
 from app.services.event_logger import track_event
 from app.services.session_manager import get_session_data, set_session_data
 from app.services.state_machine_service import StateMachineService
+from app.services.date_parser import normalize_date
 
 logger = logging.getLogger(__name__)
 
@@ -620,9 +620,12 @@ class DispatcherService:
         if isinstance(val, date): return val
         if not val: return date.today()
         try:
-            return dateparser.parse(str(val)).date()
+            normalized = normalize_date(str(val))
+            if normalized:
+                return datetime.strptime(normalized, "%d-%m-%Y").date()
         except Exception:
-            return date.today()
+            pass
+        return date.today()
 
     @staticmethod
     def _reference_code(prefix: str, entity_id: Any) -> str:

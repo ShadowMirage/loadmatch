@@ -33,7 +33,7 @@ from app.services.dispatcher_service import DispatcherService
 from app.services.recovery_service import RecoveryService
 from app.services.event_bus import EventBus
 from app.services import kyc_service
-from app.services.date_parser import normalize_date
+from app.services.date_parser import extract_first_date, normalize_date
 from app.services.logistics_data import RESOLVER_VERSION
 from app.services.rate_limiter import check as rate_limit_check
 from app.services.whatsapp_service import send_text, safe_fallback
@@ -46,13 +46,6 @@ from app.contracts.enums import Intent
 logger = logging.getLogger("loadmatch.webhook")
 router = APIRouter(prefix="/webhook", tags=["Webhook"])
 _TRUCK_PLATE_PATTERN = re.compile(r"^[A-Z]{2}\d{1,2}[A-Z]{1,3}\d{4}$")
-_DATE_SEARCH_PATTERNS = (
-    re.compile(r"\b(today|tomorrow)\b", flags=re.IGNORECASE),
-    re.compile(r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b"),
-    re.compile(r"\b\d{4}[/-]\d{1,2}[/-]\d{1,2}\b"),
-)
-
-
 class AtomicDispatchError(RuntimeError):
     def __init__(self, message: str, *, idem_key: Optional[str] = None):
         super().__init__(message)
@@ -100,14 +93,8 @@ def _parse_date_from_text(text: str) -> Optional[str]:
     if not text:
         return None
 
-    raw_text = str(text).strip()
-    for pattern in _DATE_SEARCH_PATTERNS:
-        match = pattern.search(raw_text)
-        if match:
-            normalized = _normalize_date_value(match.group(0))
-            if normalized:
-                return normalized
-    return None
+    normalized = extract_first_date(str(text).strip())
+    return normalized or None
 
 
 def _looks_like_truck_plate(value: Any) -> bool:
