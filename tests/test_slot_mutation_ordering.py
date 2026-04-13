@@ -522,3 +522,103 @@ def test_load_confirm_correction_retains_load_authority_and_pickup_date():
     assert corrected_extraction.data["pickup_date"] == initial_extraction.data["pickup_date"]
     assert corrected_payload.weight_kg == 5000
     assert corrected_payload.pickup_date is not None
+
+
+def test_interactive_confirm_sets_intent_and_confidence_metadata_early():
+    async def run():
+        msg = {
+            "type": "interactive",
+            "interactive": {
+                "button_reply": {
+                    "id": "CONFIRM_LOAD",
+                    "title": "Confirm",
+                }
+            },
+        }
+        user = SimpleNamespace(id="user-123", state="LOAD_FLOW")
+        extraction_engine = _StubExtractionEngine(
+            ExtractionResult(
+                intent=Intent.UNKNOWN,
+                data={},
+                confidence=0.0,
+                source="TEST",
+                trace_id="trace-interactive-confirm",
+            )
+        )
+        resolver = IntentResolver()
+        factory = PayloadFactory()
+        idempotency = MagicMock()
+        idempotency.fetch_cached_intent_data.return_value = None
+
+        with patch("app.routers.webhook.peek_session", return_value=SimpleNamespace(current_workflow="LOAD_FLOW")), \
+             patch("app.routers.webhook.get_session_data", return_value={"resolver_version": "v-test"}):
+            return await _phase1_resolve_intent(
+                msg=msg,
+                phone="919999999999",
+                wa_id="wamid.interactive.confirm",
+                user=user,
+                db=MagicMock(),
+                extraction_engine=extraction_engine,
+                intent_resolver=resolver,
+                payload_factory=factory,
+                idempotency=idempotency,
+            )
+
+    intent, payload, extraction, current_workflow = asyncio.run(run())
+
+    assert current_workflow == "LOAD_FLOW"
+    assert intent == Intent.CONFIRM
+    assert payload is not None
+    assert extraction.intent == Intent.CONFIRM
+    assert extraction.confidence == 1.0
+    assert extraction.data["interactive_action_id"] == "CONFIRM_LOAD"
+    assert extraction.data["confidence_source"] == "interactive"
+
+
+def test_session_promoted_slots_get_session_fallback_confidence_source():
+    async def run():
+        msg = {"type": "text", "text": {"body": "actually 5 ton"}}
+        user = SimpleNamespace(id="user-123", state="LOAD_FLOW")
+        extraction_engine = _StubExtractionEngine(
+            ExtractionResult(
+                intent=Intent.UNKNOWN,
+                data={"weight_kg": 5000},
+                confidence=0.4,
+                source="TEST",
+                trace_id="trace-session-fallback",
+            )
+        )
+        resolver = IntentResolver()
+        factory = PayloadFactory()
+        idempotency = MagicMock()
+        idempotency.fetch_cached_intent_data.return_value = None
+
+        with patch("app.routers.webhook.peek_session", return_value=SimpleNamespace(current_workflow="LOAD_FLOW")), \
+             patch(
+                 "app.routers.webhook.get_session_data",
+                 return_value={
+                     "from_city": "agra",
+                     "to_city": "delhi",
+                     "pickup_date": "14-04-2026",
+                     "resolver_version": "v-test",
+                 },
+             ):
+            return await _phase1_resolve_intent(
+                msg=msg,
+                phone="919999999999",
+                wa_id="wamid.session.fallback",
+                user=user,
+                db=MagicMock(),
+                extraction_engine=extraction_engine,
+                intent_resolver=resolver,
+                payload_factory=factory,
+                idempotency=idempotency,
+            )
+
+    intent, payload, extraction, current_workflow = asyncio.run(run())
+
+    assert current_workflow == "LOAD_FLOW"
+    assert intent == Intent.CREATE_LOAD
+    assert isinstance(payload, CreateLoadPayload)
+    assert extraction.data["confidence_source"] == "session_fallback"
+    assert extraction.data["pickup_date"] == "14-04-2026"

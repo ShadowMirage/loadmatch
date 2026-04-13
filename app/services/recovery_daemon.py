@@ -8,7 +8,7 @@ from app.contracts.enums import Intent
 from app.models.processed_message import ProcessedMessage, WorkflowEvent
 from app.services.payload_factory import PayloadFactory
 from app.services.dispatcher_service import DispatcherService
-from app.services.recovery_service import RecoveryService
+from app.services.recovery_service import DeliveryResult, RecoveryService
 from app.services.session_manager import peek_session
 from app.core.trace_context import set_trace_id
 from app.core.recovery_utils import is_zombie, get_instance_id
@@ -274,7 +274,8 @@ class RecoveryDaemon:
                 .filter(
                     ProcessedMessage.status == "SUCCESS",
                     ProcessedMessage.delivered_at == None,
-                    ProcessedMessage.response_payload != None
+                    ProcessedMessage.response_payload != None,
+                    (ProcessedMessage.delivery_state == None) | (ProcessedMessage.delivery_state != "SKIPPED_SANDBOX"),
                 )
                 .with_for_update(skip_locked=True)
                 .limit(20)
@@ -293,12 +294,12 @@ class RecoveryDaemon:
                     continue
                 
                 logger.info(f"🚀 Recovering delivery for {record.idempotency_key}")
-                success = await recovery.send_with_backoff(
+                delivery_result = await recovery.send_with_backoff(
                     phone,
                     record.response_payload,
                     ignore_guard=True,
                 )
-                if success:
+                if delivery_result == DeliveryResult.DELIVERED:
                     record.delivered_at = datetime.now(timezone.utc)
                     record.delivery_state = "DELIVERED"
                     db.add(WorkflowEvent(
@@ -306,6 +307,23 @@ class RecoveryDaemon:
                         event_type="DELIVERY_SUCCESS",
                         trace_id=record.trace_id,
                         payload={"at": record.delivered_at.isoformat()}
+                    ))
+                    db.flush()
+                    db.commit()
+                elif delivery_result == DeliveryResult.SKIPPED_SANDBOX:
+                    terminal_at = datetime.now(timezone.utc)
+                    record.delivery_state = "SKIPPED_SANDBOX"
+                    record.failed_at = terminal_at
+                    record.error_log = {
+                        "error": "WhatsApp sandbox allowlist block",
+                        "code": 131030,
+                        "at": terminal_at.isoformat(),
+                    }
+                    db.add(WorkflowEvent(
+                        processed_message_id=record.id,
+                        event_type="DELIVERY_SKIPPED_SANDBOX",
+                        trace_id=record.trace_id,
+                        payload={"code": 131030, "at": terminal_at.isoformat()},
                     ))
                     db.flush()
                     db.commit()

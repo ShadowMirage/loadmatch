@@ -180,6 +180,12 @@ def _workflow_family(workflow: Optional[str]) -> Optional[str]:
     return None
 
 
+def _interactive_intent_override(intent_resolver: IntentResolver, interactive_payload: Optional[dict]) -> Optional[Intent]:
+    if not interactive_payload:
+        return None
+    return intent_resolver.resolve_interactive_action_id(interactive_payload.get("id", ""))
+
+
 def _extract_messages(body: dict) -> list[dict]:
     messages: list[dict] = []
     for entry in body.get("entry", []):
@@ -360,11 +366,9 @@ async def _phase1_resolve_intent(
     session_data_for_extraction["current_workflow"] = current_workflow
 
     extraction = await extraction_engine.extract(raw_text, user, session_data_for_extraction)
-    logger.info(f"[EXTRACTION] intent={extraction.intent} fresh_data={extraction.data}")
-
-    # Quantity recovery guard immediately after extraction.
     extraction_data = extraction.data if isinstance(extraction.data, dict) else {}
     interactive_action_id = ""
+    interactive_intent = _interactive_intent_override(intent_resolver, interactive_payload)
     if interactive_payload:
         interactive_action_id = str(interactive_payload.get("id") or "").strip()
         interactive_action_title = str(interactive_payload.get("title") or "").strip()
@@ -374,6 +378,10 @@ async def _phase1_resolve_intent(
                 "interactive_action_id": interactive_action_id,
                 "interactive_action_title": interactive_action_title,
             }
+            extraction_data.setdefault("confidence_source", "interactive")
+            extraction.confidence = 1.0
+            if interactive_intent is not None:
+                extraction.intent = interactive_intent
     parsed_qty_kg = _parse_quantity_kg_from_text(raw_text)
     if parsed_qty_kg:
         extraction_data.setdefault("weight_kg", parsed_qty_kg)
@@ -383,6 +391,7 @@ async def _phase1_resolve_intent(
         extraction_data["date"] = parsed_date
     extraction_data = _sanitize_plate_alias(extraction_data)
     extraction.data = extraction_data
+    logger.info(f"[EXTRACTION] intent={extraction.intent} fresh_data={extraction.data}")
 
     # Support partial updates (corrections): merge prior session_data with fresh extraction.
     effective_session_data = session_data if isinstance(session_data, dict) else {}
@@ -442,11 +451,8 @@ async def _phase1_resolve_intent(
         interrupt_menu_active=interrupt_menu_active,
     )
 
-    interactive_action_id_norm = str(merged_data.get("interactive_action_id") or "").upper()
-    if interactive_action_id_norm in {"POST_TRUCK", "START_TRUCK"}:
-        intent = Intent.POST_TRUCK
-    elif interactive_action_id_norm in {"FIND_TRUCK", "POST_LOAD"}:
-        intent = Intent.CREATE_LOAD
+    if interactive_intent is not None:
+        intent = interactive_intent
 
     workflow_family = _workflow_family(current_workflow)
 
@@ -488,6 +494,8 @@ async def _phase1_resolve_intent(
 
     # Final payload boundary canonicalization gate.
     merged_data = _canonicalize_workflow_slots(merged_data, intent)
+    if isinstance(merged_data, dict) and not merged_data.get("confidence_source"):
+        merged_data["confidence_source"] = "session_fallback"
     if not merged_data.get("resolver_version"):
         merged_data["resolver_version"] = RESOLVER_VERSION
 

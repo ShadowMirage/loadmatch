@@ -274,7 +274,8 @@ class StateMachineService:
         normalized_last_updated = self._as_utc(last_updated)
         workflow_expired = False
         if normalized_last_updated and datetime.now(timezone.utc) - normalized_last_updated > self.SESSION_TTL:
-            logger.info(f"Session expired (State: {state}). Reverting to IDLE.")
+            if state != "IDLE":
+                logger.info(f"Session expired (State: {state}). Reverting to IDLE.")
             workflow_expired = self.workflow_is_active(state)
             state = "IDLE"
 

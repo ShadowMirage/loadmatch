@@ -18,7 +18,7 @@ from app.services.intent_resolver import IntentResolver
 from app.services.logistics_data import RESOLVER_VERSION
 from app.routers.webhook import _extract_messages, _phase2_atomic_dispatch
 from app.services.recovery_daemon import RecoveryDaemon
-from app.services.recovery_service import RecoveryService
+from app.services.recovery_service import DeliveryResult, RecoveryService
 from app.services.idempotency_service import IdempotencyService
 from app.services.supply_visibility_service import (
     _notify_shipper,
@@ -156,7 +156,28 @@ def test_send_with_backoff_returns_false_when_send_raises():
                 ignore_guard=True,
             )
 
-    assert asyncio.run(run()) is False
+    assert asyncio.run(run()) == DeliveryResult.FAILED
+
+
+def test_send_with_backoff_skips_sandbox_block_without_retry_loop():
+    attempts = {"count": 0}
+
+    async def fake_send_response(*args, **kwargs):
+        attempts["count"] += 1
+        raise RuntimeError("(#131030) Recipient phone number not in allowed list")
+
+    async def run():
+        with patch("app.services.whatsapp_service.send_response", fake_send_response):
+            service = RecoveryService(None)
+            return await service.send_with_backoff(
+                "919999999999",
+                {"text": "Recovered"},
+                retries=5,
+                ignore_guard=True,
+            )
+
+    assert asyncio.run(run()) == DeliveryResult.SKIPPED_SANDBOX
+    assert attempts["count"] == 1
 
 
 def test_normalize_parsed_result_moves_top_level_fields_into_data():
@@ -1053,6 +1074,52 @@ def test_recovery_takeover_sets_executing_state():
     assert "RECOVERY_TAKEOVER_EXECUTING_MESSAGE" in info_messages
     assert record.delivery_state == "EXECUTING"
     mock_replay_record.assert_awaited_once_with(db, record)
+
+
+def test_recovery_delivery_marks_sandbox_block_as_terminal():
+    record = SimpleNamespace(
+        id="pm-sandbox",
+        idempotency_key="user-123:POST_TRUCK:wamid.sandbox:TRUCK_FLOW",
+        trace_id="trace-sandbox",
+        request_payload={"phone": "919999999999"},
+        response_payload={"text": "Truck Posted"},
+        status="SUCCESS",
+        delivered_at=None,
+        delivery_state=None,
+        failed_at=None,
+        error_log=None,
+    )
+    query = MagicMock()
+    query.filter.return_value = query
+    query.with_for_update.return_value = query
+    query.limit.return_value = query
+    query.all.return_value = [record]
+    db = MagicMock()
+    db.query.return_value = query
+
+    async def run():
+        daemon = RecoveryDaemon(lambda: db)
+        with patch("app.services.recovery_daemon.RecoveryService.send_with_backoff", return_value=DeliveryResult.SKIPPED_SANDBOX):
+            await daemon.scan_and_deliver()
+
+    asyncio.run(run())
+
+    assert record.delivery_state == "SKIPPED_SANDBOX"
+    assert record.failed_at is not None
+    assert record.error_log["code"] == 131030
+    db.commit.assert_called()
+
+
+def test_state_machine_does_not_log_idle_expiration_noise():
+    service = StateMachineService()
+    stale_time = datetime(2025, 1, 1)
+
+    with patch("app.services.state_machine_service.logger.info") as mock_info:
+        result = service.transition("IDLE", Intent.UNKNOWN, stale_time)
+
+    assert result.next_state == "IDLE"
+    info_messages = [call.args[0] for call in mock_info.call_args_list]
+    assert "Session expired (State: IDLE). Reverting to IDLE." not in info_messages
 
 
 def test_fetch_cached_intent_data_ignores_inflight_records():

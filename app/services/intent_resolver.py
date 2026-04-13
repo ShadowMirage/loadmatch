@@ -16,6 +16,41 @@ logger = logging.getLogger(__name__)
 CONFIDENCE_THRESHOLD = 0.6
 
 class IntentResolver:
+    @staticmethod
+    def resolve_interactive_action_id(action_id: str) -> Optional[Intent]:
+        normalized = str(action_id or "").upper()
+        if not normalized:
+            return None
+        if normalized.startswith("RATING_"):
+            return Intent.RATE_TRIP
+        if normalized.startswith("TRACK_TRUCK_"):
+            return Intent.TRACK_TRUCK
+        if normalized.startswith("CONTACT_DRIVER_"):
+            return Intent.CONTACT_DRIVER
+        if normalized.startswith("CONFIRM_BOOKING_"):
+            return Intent.CONFIRM_BOOKING
+        if normalized.startswith("CANCEL_BOOKING_"):
+            return Intent.CANCEL
+        if normalized in ("CONFIRM_LOAD", "CONFIRM_TRUCK", "CONFIRM_LOAD_REQUEST", "CONFIRM_TRUCK_LISTING"):
+            return Intent.CONFIRM
+        if normalized in ("CANCEL_LOAD", "CANCEL_TRUCK", "CANCEL", "MAIN_MENU"):
+            return Intent.CANCEL
+        if normalized in ("POST_TRUCK", "START_TRUCK"):
+            return Intent.POST_TRUCK
+        if normalized in ("FIND_TRUCK", "POST_LOAD"):
+            return Intent.CREATE_LOAD
+        if normalized == "TRACK_BOOKING":
+            return Intent.VIEW_LOADS
+        if normalized == "DELIVERY_STATUS":
+            return Intent.VIEW_TRUCKS
+        if normalized == "UPLOAD_KYC":
+            return Intent.UPLOAD_KYC
+        if normalized == "VIEW_LOADS":
+            return Intent.VIEW_LOADS
+        if normalized == "VIEW_TRUCKS":
+            return Intent.VIEW_TRUCKS
+        return None
+
     def resolve(
         self, 
         extraction: ExtractionResult, 
@@ -39,36 +74,9 @@ class IntentResolver:
         
         # 1. Interactive Payload (Direct User Action — always trusted)
         if interactive_payload:
-            action_id = interactive_payload.get("id", "").upper()
-            if action_id.startswith("RATING_"):
-                return Intent.RATE_TRIP
-            if action_id.startswith("TRACK_TRUCK_"):
-                return Intent.TRACK_TRUCK
-            if action_id.startswith("CONTACT_DRIVER_"):
-                return Intent.CONTACT_DRIVER
-            if action_id.startswith("CONFIRM_BOOKING_"):
-                return Intent.CONFIRM_BOOKING
-            if action_id.startswith("CANCEL_BOOKING_"):
-                return Intent.CANCEL
-            if action_id in ("CONFIRM_LOAD", "CONFIRM_TRUCK", "CONFIRM_LOAD_REQUEST", "CONFIRM_TRUCK_LISTING"):
-                return Intent.CONFIRM
-            if action_id in ("CANCEL_LOAD", "CANCEL_TRUCK", "CANCEL", "MAIN_MENU"):
-                return Intent.CANCEL
-            if action_id in ("POST_TRUCK", "START_TRUCK"):
-                return Intent.POST_TRUCK
-            if action_id in ("FIND_TRUCK", "POST_LOAD"):
-                return Intent.CREATE_LOAD
-            if action_id == "TRACK_BOOKING":
-                return Intent.VIEW_LOADS
-            if action_id == "DELIVERY_STATUS":
-                return Intent.VIEW_TRUCKS
-            if action_id == "UPLOAD_KYC":
-                return Intent.UPLOAD_KYC
-            if action_id == "VIEW_LOADS":
-                return Intent.VIEW_LOADS
-            if action_id == "VIEW_TRUCKS":
-                return Intent.VIEW_TRUCKS
-            # ... add more mappings as needed
+            interactive_intent = self.resolve_interactive_action_id(interactive_payload.get("id", ""))
+            if interactive_intent is not None:
+                return interactive_intent
 
         if extraction.intent == Intent.GREETING:
             return Intent.GREETING
