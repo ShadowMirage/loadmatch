@@ -1,5 +1,6 @@
 import logging
 import dataclasses
+from datetime import datetime
 from typing import Any, Dict
 from app.contracts.enums import Intent
 from app.contracts.payloads import CreateLoadPayload, PostTruckPayload, GenericActionPayload
@@ -46,8 +47,8 @@ class PayloadFactory:
 
         return {}
 
-    def build(self, intent: Intent, data: Dict[str, Any]) -> Any:
-        normalized_data = self._normalize_aliases(intent, data or {})
+    def build(self, intent: Intent, data: Dict[str, Any], *, relative_base: datetime) -> Any:
+        normalized_data = self._normalize_aliases(intent, data or {}, relative_base=relative_base)
         payload_class = self.PAYLOAD_MAP.get(intent)
         
         if not payload_class:
@@ -89,7 +90,7 @@ class PayloadFactory:
             raise CriticalLogicError(f"Schema validation failed: {str(e)}")
 
     @staticmethod
-    def _normalize_aliases(intent: Intent, data: Dict[str, Any]) -> Dict[str, Any]:
+    def _normalize_aliases(intent: Intent, data: Dict[str, Any], *, relative_base: datetime) -> Dict[str, Any]:
         normalized = dict(data)
 
         if intent == Intent.CREATE_LOAD:

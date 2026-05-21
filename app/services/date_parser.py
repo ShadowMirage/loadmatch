@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import dateparser
@@ -14,6 +14,21 @@ _RELATIVE_DATE_OFFSETS = (
 
 def _relative_base_now() -> datetime:
     return datetime.now(USER_TIMEZONE)
+
+
+def parse_message_timestamp(ts_val: str | int) -> datetime:
+    """
+    Parses WhatsApp/Meta message timestamp (epoch seconds or ms)
+    into a timezone-aware Asia/Kolkata datetime.
+    """
+    try:
+        ts = float(ts_val)
+        # Meta timestamps can be 10 digits (seconds) or 13 digits (ms)
+        if ts > 10_000_000_000:
+            ts /= 1000
+        return datetime.fromtimestamp(ts, tz=timezone.utc).astimezone(USER_TIMEZONE)
+    except Exception:
+        return _relative_base_now()
 
 
 def _dateparser_settings(relative_base: datetime) -> dict:
@@ -34,7 +49,7 @@ def _normalize_relative_phrase(text: str, relative_base: datetime) -> str:
     return ""
 
 
-def normalize_date(date_str: str, *, relative_base: datetime | None = None) -> str:
+def normalize_date(date_str: str, *, relative_base: datetime) -> str:
     """
     Normalizes natural language date strings (e.g., 'tomorrow') to DD-MM-YYYY format.
     If no date is found, returns an empty string.
@@ -46,18 +61,17 @@ def normalize_date(date_str: str, *, relative_base: datetime | None = None) -> s
     if not cleaned:
         return ""
 
-    local_base = relative_base or _relative_base_now()
-    explicit_relative = _normalize_relative_phrase(cleaned, local_base)
+    explicit_relative = _normalize_relative_phrase(cleaned, relative_base)
     if explicit_relative:
         return explicit_relative
 
-    parsed = dateparser.parse(cleaned.lower(), settings=_dateparser_settings(local_base))
+    parsed = dateparser.parse(cleaned.lower(), settings=_dateparser_settings(relative_base))
     if parsed:
         return parsed.astimezone(USER_TIMEZONE).strftime("%d-%m-%Y")
     return ""
 
 
-def extract_first_date(text: str, *, relative_base: datetime | None = None) -> str:
+def extract_first_date(text: str, *, relative_base: datetime) -> str:
     if not text:
         return ""
 
@@ -65,16 +79,16 @@ def extract_first_date(text: str, *, relative_base: datetime | None = None) -> s
     if not cleaned:
         return ""
 
-    local_base = relative_base or _relative_base_now()
-    explicit_relative = _normalize_relative_phrase(cleaned, local_base)
+    explicit_relative = _normalize_relative_phrase(cleaned, relative_base)
     if explicit_relative:
         return explicit_relative
 
     matches = search_dates(
         cleaned,
-        settings=_dateparser_settings(local_base),
+        settings=_dateparser_settings(relative_base),
         languages=["en"],
     )
+
     if not matches:
         return ""
 

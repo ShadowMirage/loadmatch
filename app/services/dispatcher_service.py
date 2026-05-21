@@ -71,10 +71,11 @@ class DispatcherService:
     'Dumb' executor. NO validation. NO branching.
     Executes Intent using Payload. Returns standardized Response.
     """
-    def __init__(self, db: Session, user_id: str, phone: str = None):
+    def __init__(self, db: Session, user_id: str, *, relative_base: datetime, phone: str = None):
         self.db = db
         self.user_id = user_id
         self.phone = phone
+        self.relative_base = relative_base
 
     def execute(self, intent: Intent, payload: Any, current_workflow: Optional[str] = None) -> ContractResponse:
         """
@@ -288,7 +289,8 @@ class DispatcherService:
                     f"{load.from_city} → {load.to_city}\n"
                     f"{load.weight_kg} kg on {self._format_date(load.pickup_date)}"
                     f"{self._format_load_match_summary(matching_summary)}"
-                )
+                ),
+                metadata={"load_id": str(load.id)}
             )
         except Exception as e:
             logger.error(f"Failed to confirm load: {e}")
@@ -427,7 +429,8 @@ class DispatcherService:
                     f"{listing.from_city} → {listing.to_city}\n"
                     f"{listing.available_capacity_kg} kg on {self._format_date(listing.departure_date)}"
                     f"{self._format_truck_match_summary(matching_summary)}"
-                )
+                ),
+                metadata={"listing_id": str(listing.id)}
             )
         except Exception as e:
             logger.error(f"Failed to confirm truck: {e}")
@@ -617,15 +620,28 @@ class DispatcherService:
         return d.strftime("%d-%m-%Y")
 
     def _coerce_date(self, val: Any) -> date:
-        if isinstance(val, date): return val
-        if not val: return date.today()
+        # Stringify to ensure parser handles date objects and ISO strings same as raw text
+        raw_val = str(val) if val else None
+        if not raw_val: 
+            return self.relative_base.date()
+            
         try:
-            normalized = normalize_date(str(val))
+            # Enforce deterministic anchoring using relative_base
+            normalized = normalize_date(raw_val, relative_base=self.relative_base)
             if normalized:
-                return datetime.strptime(normalized, "%d-%m-%Y").date()
+                parsed = datetime.strptime(normalized, "%d-%m-%Y").date()
+                # 4. Past-year Guard: Reject historical years from LLM hallucination
+                if parsed.year < self.relative_base.year:
+                    self._track_internal_event("DATE_YEAR_CORRECTION", {"original": raw_val, "corrected": parsed.isoformat()})
+                    parsed = parsed.replace(year=self.relative_base.year)
+                
+                self._track_internal_event("DATE_REANCHOR_EVENTS_TOTAL", {"input": raw_val, "base": self.relative_base.isoformat()})
+                return parsed
         except Exception:
             pass
-        return date.today()
+            
+        return self.relative_base.date()
+
 
     @staticmethod
     def _reference_code(prefix: str, entity_id: Any) -> str:
@@ -637,21 +653,56 @@ class DispatcherService:
             return default
         return float(value)
 
+    def _is_valid_slot(self, key: str, value: Any) -> bool:
+        """Determines if a candidate slot value is canonical-valid."""
+        if value in (None, ""):
+            return False
+        if key in ("from_city", "to_city", "current_city"):
+            return self._city_label(value) != "Unknown"
+        return True
+
+    def _select_valid_slot(self, key: str, payload_val: Any, extraction_val: Any, session_val: Any) -> Any:
+        """
+        Precedence Logic:
+        1. valid(payload) wins (Explicit user action / buttons)
+        2. valid(session) wins over extraction IF already valid (Protects against noisy re-extraction)
+        3. valid(extraction) wins over invalid/empty session
+        """
+        if self._is_valid_slot(key, payload_val):
+            if session_val and payload_val != session_val:
+                self._track_internal_event("PAYLOAD_OVERRIDE_EVENTS_TOTAL", {"field": key, "old": session_val, "new": payload_val})
+            return payload_val
+            
+        if self._is_valid_slot(key, session_val):
+            if self._is_valid_slot(key, extraction_val) and extraction_val != session_val:
+                # Valid session protected against valid but potentially noisy extraction
+                self._track_internal_event("SESSION_SLOT_PROTECTION_TRIGGERED", {"field": key, "session": session_val, "blocked_extraction": extraction_val})
+            return session_val
+            
+        if self._is_valid_slot(key, extraction_val):
+            return extraction_val
+            
+        # If extraction and payload are both invalid but present/conflicting
+        if extraction_val and payload_val and extraction_val != payload_val:
+            self._track_internal_event("DISPATCHER_SLOT_CONFLICT_EVENTS_TOTAL", {"field": key, "payload": payload_val, "extraction": extraction_val})
+
+        return payload_val or extraction_val or session_val
+
     def _collect_payload_data(self, payload: Any) -> dict:
         payload_data = {}
-        extraction_data = None
+        extraction_data = {}
         if payload is None:
             payload_data = {}
         elif isinstance(payload, dict):
             payload_data = payload.get("data", payload)
-            extraction_data = payload_data if isinstance(payload_data, dict) else None
+            extraction_data = payload_data if isinstance(payload_data, dict) else {}
         elif hasattr(payload, "data") and isinstance(payload.data, dict):
             payload_data = payload.data
             extraction_data = payload.data
         elif dataclasses.is_dataclass(payload):
-            extraction_data = getattr(payload, "extraction_data", None)
+            extraction_data = getattr(payload, "extraction_data", None) or {}
             payload_data = {
-                **(extraction_data if isinstance(extraction_data, dict) else {}),
+                **extraction_data,
                 **dataclasses.asdict(payload),
             }
         else:
@@ -661,7 +712,7 @@ class DispatcherService:
                 if not key.startswith("_")
             }
             maybe_extraction = getattr(payload, "extraction_data", None)
-            extraction_data = maybe_extraction if isinstance(maybe_extraction, dict) else None
+            extraction_data = maybe_extraction if isinstance(maybe_extraction, dict) else {}
 
         session_data = {}
         if self.phone:
@@ -670,8 +721,9 @@ class DispatcherService:
             except Exception:
                 session_data = {}
 
+        # 1. Authority Drift Detection
         if (
-            isinstance(extraction_data, dict)
+            extraction_data
             and session_data
             and extraction_data.get("lane_key")
             and session_data.get("lane_key")
@@ -682,26 +734,36 @@ class DispatcherService:
                 extra={
                     "session_lane_key": session_data.get("lane_key"),
                     "extraction_lane_key": extraction_data.get("lane_key"),
-                    "directional_lane_key": extraction_data.get("directional_lane_key"),
                 },
             )
 
+        # 2. Single-Slot Repair Logic: Update session with valid extractions
         if isinstance(extraction_data, dict):
-            if extraction_data.get("from_city") and extraction_data.get("to_city"):
-                session_data["from_city"] = extraction_data.get("from_city")
-                session_data["to_city"] = extraction_data.get("to_city")
+            for city_key in ("from_city", "to_city", "current_city"):
+                new_val = extraction_data.get(city_key)
+                if new_val and self._is_valid_slot(city_key, new_val):
+                    session_data[city_key] = new_val
 
         clean_payload = {k: v for k, v in (payload_data or {}).items() if v is not None}
 
+        # 3. Validity-Aware Merge Precedence
+        # Rule: valid(payload) > valid(extraction) > valid(session)
         merged = {}
-        merged.update(session_data or {})
-        merged.update(extraction_data or {})
-        merged.update(clean_payload or {})
+        all_keys = set(list(session_data.keys()) + list(extraction_data.keys()) + list(clean_payload.keys()))
+        for key in all_keys:
+            merged[key] = self._select_valid_slot(
+                key,
+                clean_payload.get(key),
+                extraction_data.get(key),
+                session_data.get(key)
+            )
+
+        # 4. Global Resolver Versioning
         if not merged.get("resolver_version"):
             merged["resolver_version"] = (
                 clean_payload.get("resolver_version")
-                or (extraction_data or {}).get("resolver_version")
-                or (session_data or {}).get("resolver_version")
+                or extraction_data.get("resolver_version")
+                or session_data.get("resolver_version")
                 or RESOLVER_VERSION
             )
         return merged

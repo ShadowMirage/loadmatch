@@ -13,6 +13,7 @@ import logging
 import asyncio
 import random
 import re
+from datetime import datetime
 from dataclasses import dataclass
 from typing import Dict, Any
 
@@ -103,7 +104,7 @@ class ExtractionEngine:
         return data
 
 
-    async def extract(self, text: str, user: Any, session_data: Dict[str, Any]) -> ExtractionResult:
+    async def extract(self, text: str, user: Any, session_data: Dict[str, Any], *, relative_base: datetime) -> ExtractionResult:
         """Main entry point for extraction with circuit breaker logic."""
         normalized_text = (text or "").strip().lower()
 
@@ -129,7 +130,7 @@ class ExtractionEngine:
             for attempt in range(2):
                 try:
                     # LLM Path (now returns confidence from Pydantic pipeline)
-                    ai_result = await extract_with_context(normalized_text, session_data)
+                    ai_result = await extract_with_context(normalized_text, session_data, relative_base)
                     
                     # Update Circuit Breaker on Success
                     self._record_success()

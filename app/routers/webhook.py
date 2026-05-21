@@ -33,11 +33,15 @@ from app.services.dispatcher_service import DispatcherService
 from app.services.recovery_service import RecoveryService
 from app.services.event_bus import EventBus
 from app.services import kyc_service
-from app.services.date_parser import extract_first_date, normalize_date
+from app.models.processed_message import ProcessedMessage, WorkflowEvent
+from app.services.date_parser import (
+    extract_first_date,
+    normalize_date,
+    parse_message_timestamp
+)
 from app.services.logistics_data import RESOLVER_VERSION
 from app.services.rate_limiter import check as rate_limit_check
 from app.services.whatsapp_service import send_text, safe_fallback
-from app.models.processed_message import ProcessedMessage, WorkflowEvent
 
 # ✅ SINGLE SOURCE OF TRUTH
 from app.contracts.responses import Response as ContractResponse
@@ -77,7 +81,7 @@ def _parse_quantity_kg_from_text(text: str) -> Optional[int]:
     return None
 
 
-def _normalize_date_value(value: Any) -> Optional[str]:
+def _normalize_date_value(value: Any, relative_base: datetime) -> Optional[str]:
     if value in (None, ""):
         return None
     if isinstance(value, datetime):
@@ -85,15 +89,15 @@ def _normalize_date_value(value: Any) -> Optional[str]:
     if isinstance(value, date):
         return value.strftime("%d-%m-%Y")
 
-    normalized = normalize_date(str(value).strip())
+    normalized = normalize_date(str(value).strip(), relative_base=relative_base)
     return normalized or None
 
 
-def _parse_date_from_text(text: str) -> Optional[str]:
+def _parse_date_from_text(text: str, relative_base: datetime) -> Optional[str]:
     if not text:
         return None
 
-    normalized = extract_first_date(str(text).strip())
+    normalized = extract_first_date(str(text).strip(), relative_base=relative_base)
     return normalized or None
 
 
@@ -104,7 +108,8 @@ def _looks_like_truck_plate(value: Any) -> bool:
     return bool(_TRUCK_PLATE_PATTERN.fullmatch(normalized))
 
 
-def _sanitize_plate_alias(data: dict) -> dict:
+def _sanitize_plate_alias(data: dict, *, relative_base: datetime) -> dict:
+    assert relative_base is not None, "relative_base is required for deterministic sanitization"
     if not isinstance(data, dict):
         return {}
 
@@ -112,7 +117,7 @@ def _sanitize_plate_alias(data: dict) -> dict:
     if plate_value in (None, ""):
         return data
 
-    normalized_plate_date = _normalize_date_value(plate_value)
+    normalized_plate_date = _normalize_date_value(plate_value, relative_base)
     if normalized_plate_date and not _looks_like_truck_plate(plate_value):
         data.setdefault("date", normalized_plate_date)
         data.pop("plate", None)
@@ -124,15 +129,15 @@ def _sanitize_plate_alias(data: dict) -> dict:
     return data
 
 
-def _canonicalize_workflow_slots(data: dict, intent: Intent) -> dict:
+def _canonicalize_workflow_slots(data: dict, intent: Intent, relative_base: datetime) -> dict:
     if not isinstance(data, dict):
         return {}
 
     normalized = dict(data)
-    normalized = _sanitize_plate_alias(normalized)
+    normalized = _sanitize_plate_alias(normalized, relative_base=relative_base)
 
     for date_key in ("date", "pickup_date", "departure_date"):
-        normalized_date = _normalize_date_value(normalized.get(date_key))
+        normalized_date = _normalize_date_value(normalized.get(date_key), relative_base)
         if normalized_date:
             normalized[date_key] = normalized_date
 
@@ -255,6 +260,7 @@ async def _phase1_resolve_intent(
     intent_resolver: IntentResolver,
     payload_factory: PayloadFactory,
     idempotency: IdempotencyService,
+    relative_base: datetime,
     trace_id: str = "",
 ) -> Tuple[Intent, Any, ExtractionResult, Optional[str]]:
     """
@@ -352,7 +358,7 @@ async def _phase1_resolve_intent(
     session_data_for_extraction = dict(session_data)
     session_data_for_extraction["current_workflow"] = current_workflow
 
-    extraction = await extraction_engine.extract(raw_text, user, session_data_for_extraction)
+    extraction = await extraction_engine.extract(raw_text, user, session_data_for_extraction, relative_base=relative_base)
     extraction_data = extraction.data if isinstance(extraction.data, dict) else {}
     interactive_action_id = ""
     interactive_intent = _interactive_intent_override(intent_resolver, interactive_payload)
@@ -373,10 +379,10 @@ async def _phase1_resolve_intent(
     if parsed_qty_kg:
         extraction_data.setdefault("weight_kg", parsed_qty_kg)
         extraction_data.setdefault("capacity_kg", parsed_qty_kg)
-    parsed_date = _parse_date_from_text(raw_text)
+    parsed_date = _parse_date_from_text(raw_text, relative_base)
     if parsed_date and not any(extraction_data.get(key) for key in ("date", "pickup_date", "departure_date")):
         extraction_data["date"] = parsed_date
-    extraction_data = _sanitize_plate_alias(extraction_data)
+    extraction_data = _sanitize_plate_alias(extraction_data, relative_base=relative_base)
     extraction.data = extraction_data
     logger.info(f"[EXTRACTION] intent={extraction.intent} fresh_data={extraction.data}")
 
@@ -415,16 +421,16 @@ async def _phase1_resolve_intent(
             merged_data["capacity_kg"] = qty_kg
 
     for date_key in ("date", "pickup_date", "departure_date"):
-        normalized_date = _normalize_date_value(merged_data.get(date_key))
+        normalized_date = _normalize_date_value(merged_data.get(date_key), relative_base)
         if normalized_date:
             merged_data[date_key] = normalized_date
 
     if not any(merged_data.get(key) for key in ("date", "pickup_date", "departure_date")):
-        parsed_date = _parse_date_from_text(raw_text)
+        parsed_date = _parse_date_from_text(raw_text, relative_base)
         if parsed_date:
             merged_data["date"] = parsed_date
 
-    merged_data = _sanitize_plate_alias(merged_data)
+    merged_data = _sanitize_plate_alias(merged_data, relative_base=relative_base)
 
     if not merged_data.get("resolver_version"):
         merged_data["resolver_version"] = effective_session_data.get("resolver_version") or RESOLVER_VERSION
@@ -480,7 +486,7 @@ async def _phase1_resolve_intent(
             intent = Intent.CREATE_LOAD
 
     # Final payload boundary canonicalization gate.
-    merged_data = _canonicalize_workflow_slots(merged_data, intent)
+    merged_data = _canonicalize_workflow_slots(merged_data, intent, relative_base)
     if isinstance(merged_data, dict) and not merged_data.get("confidence_source"):
         merged_data["confidence_source"] = "session_fallback"
     if not merged_data.get("resolver_version"):
@@ -494,7 +500,7 @@ async def _phase1_resolve_intent(
     payload = None
     if intent not in INTERRUPT_INTENTS:
         try:
-            payload = payload_factory.build(intent, merged_data)
+            payload = payload_factory.build(intent, merged_data, relative_base=relative_base)
         except Exception as e:
             logger.info(f"Payload validation deferred for {intent.value}: {e}")
             # If we're already in a workflow, stay in it but ask for missing slots
@@ -517,6 +523,8 @@ async def _phase2_atomic_dispatch(
     extraction: ExtractionResult,
     idempotency: IdempotencyService,
     state_machine: StateMachineService,
+    event_bus: EventBus,
+    relative_base: datetime,
 ) -> Tuple[Optional[ContractResponse], Optional[str], Optional[str]]:
     """
     Phase 2: Row-locking, state machine transition, dispatcher execution.
@@ -543,7 +551,7 @@ async def _phase2_atomic_dispatch(
     persisted_session = peek_session(db, phone)
     persisted_session_data = get_session_data(db, phone, locked_user.id, create=False)
     persisted_session_data = persisted_session_data if isinstance(persisted_session_data, dict) else {}
-    merge_dispatcher = DispatcherService(db, locked_user.id, phone=phone)
+    merge_dispatcher = DispatcherService(db, locked_user.id, phone=phone, relative_base=relative_base)
     merged_data = merge_dispatcher._collect_payload_data(payload)
     if isinstance(extraction.data, dict):
         merged_data = {**merged_data, **extraction.data}
@@ -643,7 +651,7 @@ async def _phase2_atomic_dispatch(
 
             # 3. Dispatcher Execution
             dispatch_start = time.perf_counter()
-            dispatcher = DispatcherService(db, locked_user.id, phone=phone)
+            dispatcher = DispatcherService(db, locked_user.id, phone=phone, relative_base=relative_base)
 
             try:
                 # Pass pre-transition state to dispatcher
@@ -708,6 +716,19 @@ async def _phase2_atomic_dispatch(
 
     # 5. Atomic Commit (Single Source of Truth)
     db.commit()
+
+    # Post-commit triggers
+    if response and hasattr(response, "metadata") and response.metadata:
+        if "load_id" in response.metadata:
+            await event_bus.emit_async({
+                "event": "LOAD_CREATED",
+                "load_id": response.metadata["load_id"]
+            })
+        if "listing_id" in response.metadata:
+            await event_bus.emit_async({
+                "event": "TRUCK_POSTED",
+                "listing_id": response.metadata["listing_id"]
+            })
 
     # Metrics
     transaction_duration = time.perf_counter() - tx_start
@@ -779,6 +800,11 @@ async def _process_message(msg: dict, db: Session) -> None:
     phone = msg.get("from")
     wa_id = msg.get("id")
     msg_type = msg.get("type")
+    
+    # Deterministic Baseline Anchoring
+    timestamp_raw = msg.get("timestamp") or int(time.time())
+    relative_base = parse_message_timestamp(timestamp_raw)
+    logger.info(f"[BASELINE_ANCHOR] wa_id={wa_id} base={relative_base.isoformat()}")
 
     try:
         if not phone:
@@ -845,6 +871,7 @@ async def _process_message(msg: dict, db: Session) -> None:
         intent, payload, extraction, current_wf = await _phase1_resolve_intent(
             msg, phone, wa_id, user, db,
             extraction_engine, intent_resolver, payload_factory, idempotency,
+            relative_base=relative_base,
             trace_id=trace_id,
         )
 
@@ -857,7 +884,9 @@ async def _process_message(msg: dict, db: Session) -> None:
             response, idem_key, msg_id = await _phase2_atomic_dispatch(
                 phone, wa_id, db, trace_id,
                 intent, payload, extraction,
-                idempotency, state_machine
+                idempotency, state_machine,
+                event_bus=event_bus,
+                relative_base=relative_base,
             )
         except Exception as e:
             db.rollback()

@@ -1,3 +1,4 @@
+from datetime import datetime
 import inspect
 import json
 import logging
@@ -76,7 +77,7 @@ def _fallback() -> dict:
 # SAFE JSON PARSER (🔥 CRITICAL FIX)
 # ---------------------------------------------------------------------------
 
-def safe_extract(llm_response: str) -> dict:
+def safe_extract(llm_response: str, relative_base: datetime) -> dict:
     """
     Stage 3: Pydantic-First Extraction Pipeline.
     
@@ -99,7 +100,7 @@ def safe_extract(llm_response: str) -> dict:
         result = parsed.model_dump()
         result["confidence"] = 0.95
         # Apply structure normalization
-        result = _normalize_parsed_result(result)
+        result = _normalize_parsed_result(result, relative_base)
         logger.debug(f"[PYDANTIC_PARSE] Success. confidence=0.95")
         return result
     except (ValidationError, Exception) as e:
@@ -122,7 +123,7 @@ def safe_extract(llm_response: str) -> dict:
 
             if isinstance(parsed, dict) and "action" in parsed:
                 parsed["confidence"] = 0.70
-                parsed = _normalize_parsed_result(parsed)
+                parsed = _normalize_parsed_result(parsed, relative_base)
                 logger.debug(f"[REGEX_PARSE] Success. confidence=0.70")
                 return parsed
     except (json.JSONDecodeError, Exception) as e:
@@ -140,7 +141,7 @@ def safe_extract(llm_response: str) -> dict:
                     parsed.setdefault("action", "confirm_load_request")
                     parsed.setdefault("data", {})
                     parsed["confidence"] = 0.40
-                    parsed = _normalize_parsed_result(parsed)
+                    parsed = _normalize_parsed_result(parsed, relative_base)
                     logger.debug(f"[HEURISTIC_PARSE] Success. confidence=0.40")
                     return parsed
     except Exception as e:
@@ -153,7 +154,7 @@ def safe_extract(llm_response: str) -> dict:
     return result
 
 
-def _normalize_parsed_result(parsed: dict) -> dict:
+def _normalize_parsed_result(parsed: dict, relative_base: datetime) -> dict:
     """
     Applies structure normalization and action correction to parsed extraction results.
     Shared across all extraction attempts.
@@ -214,7 +215,7 @@ def _normalize_parsed_result(parsed: dict) -> dict:
         data["capacity_kg"] = int(val) if isinstance(val, (int, float)) else normalize_weight(str(val))
 
     if "date" in data and data["date"]:
-        normalized_date = normalize_date(str(data["date"]))
+        normalized_date = normalize_date(str(data["date"]), relative_base=relative_base)
         if normalized_date:
             data["date"] = normalized_date
 
@@ -224,7 +225,7 @@ def _normalize_parsed_result(parsed: dict) -> dict:
 # MAIN EXTRACTION
 # ---------------------------------------------------------------------------
 
-async def extract_with_context(message: str, session_data: dict) -> dict:
+async def extract_with_context(message: str, session_data: dict, relative_base: datetime) -> dict:
     """
     Session-aware extraction.
     ALWAYS returns valid dict.
@@ -270,7 +271,7 @@ New message:
 
         logger.debug(f"[RAW AI OUTPUT]: {llm_text}")
 
-        result = safe_extract(llm_text)
+        result = safe_extract(llm_text, relative_base)
 
         if not isinstance(result, dict):
             return _fallback()

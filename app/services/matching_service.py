@@ -1,6 +1,8 @@
 import logging
+import asyncio
 from datetime import timedelta, datetime, timezone
 from sqlalchemy.orm import Session
+from app.services.event_bus import EventBus
 
 from app.marketplace import LISTING_DUPLICATE_WINDOW_SECONDS, LISTING_FRESHNESS_TTL_SECONDS
 from app.models.enums import ListingStatus, LoadRequestStatus, MatchStatus, KycFlowState, TruckType
@@ -826,6 +828,17 @@ def rank_matches(
     for listing, owner in trucks:
         score = score_match(load, listing, owner, db, now=scoring_now, score_context=score_context)
         
+        # Emit event for background notification processing (Notify Transporters)
+        eb = EventBus("background-matching")
+        asyncio.create_task(eb.emit_async({
+            "event": "MATCH_FOUND",
+            "load_id": str(load.id),
+            "listing_id": str(listing.id),
+            "user_id": str(listing.owner_id),
+            "score": score / 100.0 if score > 1 else score,
+            "pii_redact": True
+        }))
+        
         # Upsert Match record for DB tracking
         match = (
             db.query(Match)
@@ -1025,14 +1038,26 @@ def find_matches_for_truck_summary(
             continue
 
         # 🔥 AUTHORITATIVE SCORING (Unified)
-        score = score_match(load, listing, shipper, db, now=now)
+        score_pct = score_match(load, listing, shipper, db, now=now)
+
+        # Emit event for background notification processing
+        # We pass trace_id if available, though here we might need to rely on system trace
+        eb = EventBus("background-matching")
+        asyncio.create_task(eb.emit_async({
+            "event": "MATCH_FOUND",
+            "load_id": str(load.id),
+            "listing_id": str(listing.id),
+            "user_id": str(load.shipper_id),
+            "score": score_pct / 100.0 if score_pct > 1 else score_pct,
+            "pii_redact": True
+        }))
 
         matches.append({
             "cargo":       load.category.value if hasattr(load.category, 'value') else str(load.category),
             "weight":      load.weight_kg,
             "pickup":      load.from_city,
             "drop":        load.to_city,
-            "match_score": int(score),
+            "match_score": int(score_pct),
             "load_id":     str(load.id)
         })
 

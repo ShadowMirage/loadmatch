@@ -13,15 +13,19 @@ class RouteSubscription(Base):
 
     id             = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id        = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    lane_key       = Column(String(200), nullable=True)     # canonical lane key
     pickup_city    = Column(String(100), nullable=False)   # display form e.g. "Jaipur"
     drop_city      = Column(String(100), nullable=False)   # display form e.g. "Delhi"
     normalized_pickup = Column(String(100), nullable=False)
     normalized_drop   = Column(String(100), nullable=False)
+    last_notified_at = Column(DateTime(timezone=True), nullable=True)
     created_at     = Column(DateTime(timezone=True), server_default=func.now())
 
     user = relationship("User")
 
-    # Composite index so corridor lookups are O(log n)
+    # Composite indexes for fast corridor lookups and duplicate checks
     __table_args__ = (
         Index("idx_route_sub_corridor", "normalized_pickup", "normalized_drop"),
+        Index("idx_route_sub_lane_key", "lane_key"),
+        Index("idx_route_sub_user_lane", "user_id", "lane_key"),
     )

@@ -22,6 +22,7 @@ from app.routers import admin, dashboard, debug, webhook
 from app.services.debug_logger import DebugLogger
 from app.services.event_bus import EventBus
 from app.services.internal_monitoring_service import InternalMonitoringService
+from app.services.notification_service import NotificationService
 from app.services.recovery_daemon import RecoveryDaemon
 
 class TraceIdFilter(logging.Filter):
@@ -189,6 +190,13 @@ async def _start_primary_services(app: FastAPI):
     app.state.db_pid = app.state.leader_conn.execute(text("SELECT pg_backend_pid()")).scalar()
     logger.info(f"PRIMARY_NODE: RecoveryDaemon active (Leader Election Success, db_pid={app.state.db_pid})")
 
+    # 2.5 Register Notification Handlers BEFORE Replay Begins
+    # This ensures that replayed messages that trigger matches result in notifications.
+    EventBus.register_handler("MATCH_FOUND", NotificationService.handle_match_found)
+    EventBus.register_handler("LOAD_CREATED", NotificationService.handle_load_created)
+    EventBus.register_handler("TRUCK_POSTED", NotificationService.handle_truck_posted)
+    logger.info("[STARTUP] Notification handlers registered.")
+
     # 3. Instantiate and start RecoveryDaemon
     app.state.recovery_daemon = RecoveryDaemon(SessionLocal)
     app.state.recovery_task = asyncio.create_task(app.state.recovery_daemon.run_forever())
@@ -261,6 +269,14 @@ async def lifespan(app: FastAPI):
     _configure_logging()
     logger.info("Starting LoadMatch application.")
     logger.info("WORKER_BOOT_HASH=%s", BUILD_HASH)
+
+    # 0. Notification Service Configuration
+    NotificationService.configure(settings)
+
+    # 0.1 Security & Credit check
+    if environment.whatsapp_enabled() and not settings.WHATSAPP_TOKEN:
+        logger.critical("WHATSAPP_TOKEN is missing but WHATSAPP is enabled. Delivery will fail.")
+        # We don't exit in case of local dev, but we warn heavily.
 
     app.state.executor = ThreadPoolExecutor(max_workers=64)
     logger.info("ThreadPoolExecutor(max_workers=64) attached to app.state.executor")

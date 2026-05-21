@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 
 @dataclass
 class Button:
@@ -25,6 +25,7 @@ class Response:
     header: Optional[str] = None
     footer: Optional[str] = None
     list_button_text: Optional[str] = "Select Option"
+    metadata: Dict[str, Any] = field(default_factory=dict)
     
     @property
     def is_list(self) -> bool:
@@ -71,4 +72,5 @@ def coerce_response(payload: "Response | dict") -> Response:
         header=payload.get("header"),
         footer=payload.get("footer"),
         list_button_text=payload.get("list_button_text"),
+        metadata=payload.get("metadata", {}),
     )
